@@ -1,4 +1,5 @@
 import Link from 'next/link'
+import Image from 'next/image'
 import { SPORTS, ENTITLED_SPORTS, toolCatalog } from '@/lib/capabilities'
 import { SportsPanel } from '@/components/sports-panel'
 import { LoginButton, AccountNav } from '@/components/login-button'
@@ -52,10 +53,17 @@ export default async function Home() {
       {/* ─── Masthead ─────────────────────────────────────────────────────── */}
       <header className="border-b border-[color:var(--edge)] sticky top-0 z-30 backdrop-blur-md bg-black/70">
         <div className="max-w-6xl mx-auto px-6 h-14 flex items-center gap-4">
-          <div className="flex items-center gap-2.5">
-            <span className="led bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.9)] led-pulse" />
+          <Link href="/" className="flex items-center gap-2.5 shrink-0">
+            <Image
+              src="/dd_router_logo.png"
+              alt="Agent Daredevil Oracle"
+              width={1254}
+              height={713}
+              priority
+              className="h-9 w-auto"
+            />
             <span className="display text-[15px] tracking-tight text-white">SPORTS ORACLE</span>
-          </div>
+          </Link>
           <nav className="hidden md:flex items-center gap-6 ml-6 text-[12px] text-[color:var(--text-dim)]">
             <a href="#sports" className="hover:text-white transition-colors">Sports</a>
             <a href="#agents" className="hover:text-white transition-colors">For agents</a>
@@ -70,6 +78,14 @@ export default async function Home() {
 
         {/* ─── Hero ───────────────────────────────────────────────────────── */}
         <section className="space-y-7">
+          <Image
+            src="/dd_router_logo.png"
+            alt="Agent Daredevil Oracle"
+            width={1254}
+            height={713}
+            priority
+            className="w-auto h-28 sm:h-36"
+          />
           <div className="space-y-4 max-w-3xl">
             <span className="legend">REAL-TIME SPORTS DATA INFRASTRUCTURE</span>
             <h1 className="display text-[42px] sm:text-[54px] leading-[1.04] text-white">

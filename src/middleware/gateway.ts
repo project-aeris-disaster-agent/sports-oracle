@@ -7,7 +7,7 @@ import { Ratelimit }                 from '@upstash/ratelimit'
 import { Redis }                     from '@upstash/redis'
 import { createClient }              from '@supabase/supabase-js'
 import { TIERS, type TierName }      from '@/lib/tiers'
-import { SPORTS }                    from '@/lib/capabilities'
+import { SPORTS, SPORT_KEYS, getSport } from '@/lib/capabilities'
 import { politeRpmFor }              from '@/lib/providers'
 
 const redis = new Redis({
@@ -192,6 +192,14 @@ export async function gateway(
   sport: string | null
 ): Promise<{ context: GatewayContext } | NextResponse> {
 
+  // A sport that does not exist is a 404, not an access problem. Without this,
+  // the mask check below tells an agent to "stake additional $DARE" to unlock
+  // a sport we do not serve — an invitation to pay for nothing. The sport list
+  // is public (see /api/status), so answering before auth leaks nothing.
+  if (sport !== null && !SPORT_KEYS.includes(sport)) {
+    return errorResponse(404, `Unknown sport "${sport}".`, { supported: SPORT_KEYS })
+  }
+
   const rawKey = req.headers.get('x-oracle-key') ?? req.headers.get('authorization')?.replace('Bearer ', '')
 
   if (!rawKey) {
@@ -294,6 +302,17 @@ export async function gateway(
   }
 
   if (sport !== null && !sport_mask.includes(sport)) {
+    // Registered but unentitled (NASCAR, the publisher-locked esports titles):
+    // no amount of staking unlocks these, so saying "stake more" would be a lie.
+    // The mask message is reserved for sports a stake can actually buy.
+    const spec = getSport(sport)
+    if (spec && !spec.entitled) {
+      return errorResponse(
+        403,
+        `${spec.label} is not currently served.`,
+        { sport, status: spec.status, note: spec.note }
+      )
+    }
     return errorResponse(
       403,
       `Your API key does not include access to ${sport.toUpperCase()}. ` +

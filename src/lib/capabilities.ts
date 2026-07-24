@@ -29,9 +29,9 @@ export interface EndpointSpec {
 
 /**
  * Service state for a sport, surfaced as a colour indicator in the UI.
- *   online   — green  · full endpoint set, normal capacity
- *   limited  — yellow · reachable but capacity-constrained; poll conservatively
- *   offline  — red    · not available on the current plan
+ *   online   — green   · full endpoint set, normal capacity
+ *   limited  — yellow  · reachable but capacity-constrained; poll conservatively
+ *   offline  — neutral · shown as ROUTING — registered and integrating soon
  */
 export type SportStatus = 'online' | 'limited' | 'offline'
 
@@ -68,10 +68,15 @@ export interface SportSpec {
   sources:   SourceRef[]
 }
 
+// 'offline' is presented as ROUTING — a source registered and on the way, not a
+// broken endpoint. Its indicator is a neutral dim dot rather than red: red reads
+// as "error", which is the opposite of the intended "integrating soon" narrative,
+// and it stays out of the red/amber/green indicator set so those keep single
+// meanings (live / degraded / error).
 export const STATUS_META: Record<SportStatus, { label: string; dot: string; text: string; ring: string }> = {
-  online:  { label: 'OPERATIONAL', dot: 'bg-emerald-400', text: 'text-emerald-400', ring: 'shadow-[0_0_8px_rgba(52,211,153,0.9)]' },
-  limited: { label: 'LIMITED',     dot: 'bg-amber-400',   text: 'text-amber-400',   ring: 'shadow-[0_0_8px_rgba(251,191,36,0.9)]' },
-  offline: { label: 'OFFLINE',     dot: 'bg-red-500',     text: 'text-red-500',     ring: 'shadow-[0_0_8px_rgba(239,68,68,0.9)]' },
+  online:  { label: 'OPERATIONAL', dot: 'bg-emerald-400',              text: 'text-emerald-400',            ring: 'shadow-[0_0_8px_rgba(52,211,153,0.9)]' },
+  limited: { label: 'LIMITED',     dot: 'bg-amber-400',                text: 'text-amber-400',              ring: 'shadow-[0_0_8px_rgba(251,191,36,0.9)]' },
+  offline: { label: 'ROUTING',     dot: 'bg-[color:var(--text-faint)]', text: 'text-[color:var(--text-dim)]', ring: '' },
 }
 
 // TTLs are tuned to how fast each resource actually changes — see CACHE_POLICY.
@@ -267,12 +272,12 @@ const DECLARED: SportDecl[] = [
     ],
   },
   {
-    key: 'nascar', label: 'NASCAR', entitled: false, status: 'offline', statusNote: 'Not available on the current plan', capacity: 'none', teamBased: false, season: '2026',
+    key: 'nascar', label: 'NASCAR', entitled: false, status: 'offline', statusNote: 'Integrating soon', capacity: 'none', teamBased: false, season: '2026',
     note: 'Not available on the current plan — requests return 403.',
     endpoints: [],
   },
   {
-    key: 'nba_gleague', label: 'NBA G League', entitled: false, status: 'offline', statusNote: 'Not available on the current plan', capacity: 'none', teamBased: true, season: '2025',
+    key: 'nba_gleague', label: 'NBA G League', entitled: false, status: 'offline', statusNote: 'Integrating soon', capacity: 'none', teamBased: true, season: '2025',
     note: 'Not available on the current plan — requests return 403.',
     endpoints: [],
   },
@@ -299,7 +304,7 @@ const DECLARED: SportDecl[] = [
   },
   {
     key: 'football', label: 'Football (Bundesliga)', entitled: false, status: 'offline',
-    statusNote: 'Source registered — not yet serving', capacity: 'high', teamBased: true, season: '2025',
+    statusNote: 'Integrating soon', capacity: 'high', teamBased: true, season: '2025',
     note: 'OpenLigaDB is fully open and keyless, but German-league-first by design: '
         + 'Bundesliga, 2. Bundesliga and DFB-Pokal, not EPL or La Liga. Registered so the '
         + 'routing is visible, and left offline until the endpoints are verified and a '
@@ -316,7 +321,7 @@ const DECLARED: SportDecl[] = [
   {
     key: 'f1', label: 'Formula 1', entitled: true, status: 'online',
     statusNote: 'Open sources · resolution surface', capacity: 'high', teamBased: false, season: '2026',
-    note: 'Served from open community sources, not Sportradar. Scoped to prediction-market '
+    note: 'Served from open community sources. Scoped to prediction-market '
         + 'resolution: /resolve settles on the official FIA classification via Jolpica-F1, '
         + 'while /live carries provisional OpenF1 timing that must NOT be settled on. '
         + 'Telemetry, team radio and weather are pricing signals and are deliberately out of scope.',
@@ -633,18 +638,18 @@ export function badgesFor(sport: SportSpec): Badge[] {
   // Licence posture, but only for a sport that actually serves.
   //
   // On an unentitled sport this describes a source we are not routing to, and an
-  // "OPEN" chip beside a red OFFLINE light reads as availability — the opposite of
-  // the truth. Thirteen registered esports titles would each have carried one. The
-  // information is not lost: the expanded SOURCE row renders the full licence
-  // badge for every source including offline ones.
+  // "OPEN" chip beside a ROUTING light reads as availability — the opposite of
+  // the truth. The information is not lost: the expanded SOURCE row renders the
+  // full posture for every source including offline ones.
+  //
+  // The 'licensed' case emits no badge on purpose — naming a commercial data
+  // relationship on the public card exposes a supplier detail with no consumer
+  // value, so licensed sources simply carry their provider badge and nothing more.
   if (def && sport.entitled) {
     if (def.license === 'open') {
       out.push({ label: 'OPEN', tone: 'open',
         title: `${def.attribution}. Open licence — no per-call cost to us.` })
-    } else if (def.license === 'licensed') {
-      out.push({ label: 'LICENSED', tone: 'licensed',
-        title: `${def.attribution}. Commercial agreement in place.` })
-    } else {
+    } else if (def.license === 'unclear') {
       out.push({ label: 'UNVERIFIED TERMS', tone: 'caution',
         title: `${def.label} publishes no terms permitting resale — free tier only.` })
     }

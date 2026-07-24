@@ -23,6 +23,25 @@ const LICENSE_META: Record<SourceRef['license'], { label: string; cls: string }>
   unclear:  { label: 'UNVERIFIED TERMS', cls: 'text-amber-400 border-amber-400/30' },
 }
 
+// ─── Provider display ───────────────────────────────────────────────────────
+// Commercial suppliers are shown under a neutral house label, never by vendor
+// name: naming the data supplier exposes a commercial relationship with no
+// consumer value. Open community sources keep their real names — reuse depends on
+// crediting them, and hiding them would be dishonest. One constant, so the house
+// label can be rebranded in a single place.
+const HOUSE_PROVIDER = 'Direct Feed'
+
+function publicProvider(src: SourceRef): { label: string; homepage: string | null; attribution: string } {
+  if (src.license === 'licensed') {
+    return {
+      label:       HOUSE_PROVIDER,
+      homepage:    null,  // no outbound link — the link would reveal the supplier
+      attribution: 'First-party feed delivered directly through Sports Oracle.',
+    }
+  }
+  return { label: src.label, homepage: src.homepage, attribution: src.attribution }
+}
+
 /**
  * Card indicators. Content comes from badgesFor() in the manifest — this is only
  * how a tone maps to colour, so a badge cannot say something the endpoint table
@@ -59,32 +78,41 @@ function CardBadges({ sport, className = '' }: { sport: SportSpec; className?: s
 }
 
 function SourceBadge({ src }: { src: SourceRef }) {
-  const meta    = LICENSE_META[src.license]
+  const pub     = publicProvider(src)
+  // Commercial providers carry no licence chip — the whole point of the alias is
+  // that their posture isn't advertised. Open/unclear keep their honest styling.
+  const meta    = src.license === 'licensed' ? { cls: 'text-[color:var(--text-dim)] border-[color:var(--edge)]' } : LICENSE_META[src.license]
   const offline = src.status === 'offline'
   const title = [
-    src.attribution,
-    src.isDefault ? 'default source' : `select with ?provider=${src.id}`,
-    offline ? `OFFLINE — ${src.offlineReason ?? 'not currently serving'}` : null,
+    pub.attribution,
+    // Only advertise the ?provider= selector for sources we actually name.
+    src.isDefault ? 'default provider' : (pub.homepage ? `select with ?provider=${src.id}` : null),
+    offline ? `ROUTING — ${src.offlineReason ?? 'integrating soon'}` : null,
     src.authoritative ? null : 'provisional — not a settlement source',
   ].filter(Boolean).join(' · ')
 
-  return (
-    <a
-      href={src.homepage}
-      target="_blank"
-      rel="noopener noreferrer"
-      title={title}
-      className={`mono text-[10px] tracking-wide px-1.5 py-0.5 rounded border transition-colors hover:bg-white/5 ${
-        offline
-          ? 'text-[color:var(--text-faint)] border-[color:var(--edge)] border-dashed opacity-70'
-          : meta.cls
-      }`}
-    >
-      {src.label}
+  const inner = (
+    <>
+      {pub.label}
       {src.isDefault && <span className="opacity-50"> ·default</span>}
-      {offline        && <span className="opacity-70"> ·offline</span>}
+      {offline        && <span className="opacity-70"> ·routing</span>}
       {!offline && !src.authoritative && <span className="opacity-60"> ·prov</span>}
+    </>
+  )
+  const cls = `mono text-[10px] tracking-wide px-1.5 py-0.5 rounded border ${
+    offline
+      ? 'text-[color:var(--text-faint)] border-[color:var(--edge)] border-dashed opacity-70'
+      : meta.cls
+  }`
+
+  // Masked providers don't link out — an outbound link would name the supplier.
+  return pub.homepage ? (
+    <a href={pub.homepage} target="_blank" rel="noopener noreferrer" title={title}
+       className={`${cls} transition-colors hover:bg-white/5`}>
+      {inner}
     </a>
+  ) : (
+    <span title={title} className={cls}>{inner}</span>
   )
 }
 
@@ -124,7 +152,7 @@ interface Probe {
 const PROBE_META: Record<ProbeState, { label: string; cls: string }> = {
   live:           { label: 'LIVE',    cls: 'text-emerald-400' },
   cached:         { label: 'CACHED',  cls: 'text-emerald-400' },
-  offline:        { label: 'OFFLINE', cls: 'text-[color:var(--text-faint)]' },
+  offline:        { label: 'ROUTING', cls: 'text-[color:var(--text-faint)]' },
   unavailable:    { label: 'N/A',     cls: 'text-[color:var(--text-faint)]' },
   'needs-params': { label: 'NEEDS ID', cls: 'text-amber-400' },
   'rate-limited': { label: 'SLOW DOWN', cls: 'text-amber-400' },
@@ -269,24 +297,28 @@ function SportRow({ sport, state }: { sport: SportSpec; state?: SportLiveState }
         {/* Collapsed row shows what is actually serving. Alternates and offline
             sources are one click away rather than cluttering every row. */}
         {sport.sources.some(s => s.status === 'live') && (
-          <span className="hidden lg:flex items-center gap-1.5">
-            {sport.sources.filter(s => s.status === 'live').map(src => (
-              <span
-                key={src.id}
-                title={src.attribution}
-                className={`mono text-[10px] tracking-wide ${
-                  src.license === 'open'    ? 'text-emerald-400/80'
-                  : src.license === 'unclear' ? 'text-amber-400/80'
-                  : 'text-[color:var(--text-faint)]'
-                }`}
-              >
-                {src.label}
-              </span>
-            ))}
+          <span className="hidden md:flex items-center gap-1.5">
+            <span className="legend hidden lg:inline">VIA</span>
+            {sport.sources.filter(s => s.status === 'live').map(src => {
+              const pub = publicProvider(src)
+              return (
+                <span
+                  key={src.id}
+                  title={`API provider: ${pub.attribution}`}
+                  className={`mono text-[9px] tracking-[0.1em] px-1.5 py-0.5 rounded border whitespace-nowrap ${
+                    src.license === 'open'    ? 'text-emerald-400/90 border-emerald-400/25'
+                    : src.license === 'unclear' ? 'text-amber-400 border-amber-400/30'
+                    : 'text-[color:var(--text-dim)] border-[color:var(--edge)]'
+                  }`}
+                >
+                  {pub.label}
+                </span>
+              )
+            })}
             {sport.sources.some(s => s.status === 'offline') && (
               <span
-                className="mono text-[10px] text-[color:var(--text-faint)] opacity-70"
-                title="Additional sources are registered but not yet serving — expand for details."
+                className="mono text-[9px] text-[color:var(--text-faint)] px-1 py-0.5 rounded border border-dashed border-[color:var(--edge)] opacity-70"
+                title="Additional API providers registered — integrating soon. Expand for details."
               >
                 +{sport.sources.filter(s => s.status === 'offline').length}
               </span>
@@ -325,7 +357,7 @@ function SportRow({ sport, state }: { sport: SportSpec; state?: SportLiveState }
             </span>
             {sport.sources.length > 0 && (
               <span className="flex items-center gap-2">
-                <span className="legend">SOURCE</span>
+                <span className="legend">API PROVIDER</span>
                 <span className="flex flex-wrap items-center gap-1.5">
                   {sport.sources.map(src => <SourceBadge key={src.id} src={src} />)}
                 </span>
@@ -343,27 +375,41 @@ function SportRow({ sport, state }: { sport: SportSpec; state?: SportLiveState }
               this sport, and the caller picks. Only worth saying when true. */}
           {sport.sources.length > 1 && (
             <p className="px-4 pt-3 text-[11px] leading-relaxed text-[color:var(--text-dim)]">
-              <span className="legend">ROUTING</span>{' '}
-              Defaults to{' '}
-              <span className="mono text-white">
-                {sport.sources.find(s => s.isDefault)?.label}
-              </span>
-              . Select another with{' '}
-              <code className="mono text-[color:var(--blue-bright)]">?provider=</code>
-              {sport.sources.filter(s => !s.isDefault).map((s, i) => (
-                <span key={s.id}>
-                  {i === 0 ? ' ' : ', '}
-                  <code className={`mono ${s.status === 'offline'
-                    ? 'text-[color:var(--text-faint)]'
-                    : 'text-[color:var(--blue-bright)]'}`}>
-                    {s.id}
-                  </code>
-                  {s.status === 'offline' && (
-                    <span className="text-[color:var(--text-faint)]"> (offline)</span>
-                  )}
-                </span>
-              ))}
-              .
+              {(() => {
+                const def = sport.sources.find(s => s.isDefault)
+                // Only community providers are advertised as ?provider= options —
+                // a commercial supplier is never named as a selectable id.
+                const alts = sport.sources.filter(s => !s.isDefault && s.license !== 'licensed')
+                return (
+                  <>
+                    <span className="legend">ROUTING</span>{' '}
+                    Defaults to{' '}
+                    <span className="mono text-white">
+                      {def ? publicProvider(def).label : '—'}
+                    </span>
+                    {alts.length > 0 && (
+                      <>
+                        . Select another with{' '}
+                        <code className="mono text-[color:var(--blue-bright)]">?provider=</code>
+                        {alts.map((s, i) => (
+                          <span key={s.id}>
+                            {i === 0 ? ' ' : ', '}
+                            <code className={`mono ${s.status === 'offline'
+                              ? 'text-[color:var(--text-faint)]'
+                              : 'text-[color:var(--blue-bright)]'}`}>
+                              {s.id}
+                            </code>
+                            {s.status === 'offline' && (
+                              <span className="text-[color:var(--text-faint)]"> (routing)</span>
+                            )}
+                          </span>
+                        ))}
+                      </>
+                    )}
+                    .
+                  </>
+                )
+              })()}
             </p>
           )}
 
@@ -380,13 +426,13 @@ function SportRow({ sport, state }: { sport: SportSpec; state?: SportLiveState }
                       <th className="text-left font-normal pb-1">Endpoint</th>
                       <th className="text-left font-normal pb-1">Params</th>
                       <th className="text-left font-normal pb-1">Tier</th>
-                      <th className="text-left font-normal pb-1">Source</th>
+                      <th className="text-left font-normal pb-1">Provider</th>
                       <th className="text-left font-normal pb-1">Status</th>
                       <th className="text-left font-normal pb-1 hidden lg:table-cell">Use</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {sport.endpoints.map(e => {
+                    {[...sport.endpoints].sort((a, b) => a.path.localeCompare(b.path)).map(e => {
                       const src = endpointSource(sport.key, e.path)
                       return (
                         <tr key={e.path}>
@@ -408,16 +454,21 @@ function SportRow({ sport, state }: { sport: SportSpec; state?: SportLiveState }
                           {/* Per-endpoint, because one sport can span upstreams —
                               F1 settles on Jolpica and streams from OpenF1. */}
                           <td className="pr-4 whitespace-nowrap">
-                            <span
-                              title={src?.attribution}
-                              className={`mono text-[10px] ${
-                                src?.license === 'open'    ? 'text-emerald-400/80'
-                                : src?.license === 'unclear' ? 'text-amber-400/80'
-                                : 'text-[color:var(--text-faint)]'
-                              }`}
-                            >
-                              {src?.label ?? '—'}
-                            </span>
+                            {(() => {
+                              const pub = src ? publicProvider(src) : null
+                              return (
+                                <span
+                                  title={pub?.attribution}
+                                  className={`mono text-[10px] ${
+                                    src?.license === 'open'    ? 'text-emerald-400/80'
+                                    : src?.license === 'unclear' ? 'text-amber-400/80'
+                                    : 'text-[color:var(--text-faint)]'
+                                  }`}
+                                >
+                                  {pub?.label ?? '—'}
+                                </span>
+                              )
+                            })()}
                           </td>
                           {/* Live probe — proves the endpoint answers, without
                               needing a key and without returning any data. */}
@@ -459,8 +510,11 @@ function SportRow({ sport, state }: { sport: SportSpec; state?: SportLiveState }
             </>
           ) : (
             <div className="px-4 py-4 flex flex-wrap items-center gap-3">
-              <span className="mono text-[11px] text-red-400">
-                Currently unavailable.
+              <span className="flex items-center gap-2">
+                <span className="led bg-[color:var(--text-faint)]" />
+                <span className="mono text-[11px] text-[color:var(--text-dim)]">
+                  Integrating soon — routing is registered and coming online.
+                </span>
               </span>
               <Link href="/dashboard" className="btn-ghost rounded-md px-3 py-1.5 text-[12px]">
                 Notify me
@@ -522,8 +576,8 @@ export function SportsPanel({ states = [], live = false }: { states?: SportLiveS
           <span className="mono text-[11px] text-[color:var(--text-dim)]">{limited} limited</span>
         </span>
         <span className="flex items-center gap-1.5">
-          <span className="led bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.9)]" />
-          <span className="mono text-[11px] text-[color:var(--text-dim)]">{offline} offline</span>
+          <span className="led bg-[color:var(--text-faint)]" />
+          <span className="mono text-[11px] text-[color:var(--text-dim)]">{offline} routing</span>
         </span>
 
         <span className="flex-1" />
