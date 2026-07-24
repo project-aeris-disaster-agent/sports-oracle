@@ -1,0 +1,39 @@
+# ── Secrets ──────────────────────────────────────────────────────────────────
+# .env currently holds the Supabase service-role key, the Postgres password, the
+# Privy app secret and the Sportradar key. Any one of those is a full compromise,
+# so the whole family is ignored and only .env.example is tracked.
+.env
+.env.*
+!.env.example
+
+# Supabase CLI stores the linked project ref and access token here.
+supabase/.temp/
+supabase/.branches/
+
+# ── Dependencies / build ─────────────────────────────────────────────────────
+node_modules/
+.next/
+out/
+build/
+dist/
+*.tsbuildinfo
+next-env.d.ts
+
+# ── Test + scratch artefacts ─────────────────────────────────────────────────
+# The exploit and matrix suites write throwaway files with this prefix.
+_tmp-*
+*.log
+npm-debug.log*
+coverage/
+
+# ── Editor / OS ──────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ── Deploy ───────────────────────────────────────────────────────────────────
+.vercel
+
+# Stray sandbox export artifact (duplicate of src/)
+mnt/

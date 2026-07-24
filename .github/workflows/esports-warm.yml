@@ -1,0 +1,57 @@
+# .github/workflows/esports-warm.yml
+# Keeps the Dota 2 professional match feed warm.
+#
+# Separate from cache-warmup.yml because the cadence is different by an order of
+# magnitude: the traditional sports warm cold data weekly and daily data every six
+# hours, while /proMatches is a rolling window that a settling market reads within
+# minutes of a match ending. Folding a 15-minute job into that matrix would have
+# meant either over-polling eight sports or under-polling this one.
+#
+# Only dota2 runs here. It is the sole esports title that serves data — every
+# other registered title routes to an offline provider, and /api/internal/warm
+# skips anything not entitled anyway, so listing them would be noise.
+#
+# Cost: zero. OpenDota is unmetered, so upstream.ts skips the budget RPCs
+# entirely. The one warmed entry is shared by every caller of /events and by the
+# feed-first path in /resolve.
+
+name: Esports cache warm-up
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Force refresh even if cache is fresh'
+        required: false
+        default: 'false'
+
+# A run that overlaps its predecessor would fetch the same document twice for no
+# benefit. Newer data is strictly better here, so cancel the older run.
+concurrency:
+  group: esports-warm
+  cancel-in-progress: true
+
+jobs:
+  warm-dota2:
+    name: Warm Dota 2 pro match feed
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Warm dota2 event registry
+        run: |
+          # `events` is the endpoint PATH, not the upstream dataType — the warm
+          # route resolves path -> dataType/TTL/qualifier through the capability
+          # manifest, so this lands on exactly the key /events and /resolve read.
+          #
+          # /live is deliberately NOT warmed: it carries a 60s TTL, so a 15-minute
+          # warm would always be stale by the time anyone read it.
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+            -H "Content-Type: application/json" \
+            -H "x-internal-secret: ${{ secrets.INTERNAL_CRON_SECRET }}" \
+            -d "{\"sport\":\"dota2\",\"types\":[\"events\"],\"force\":${{ github.event.inputs.force || 'false' }}}" \
+            "${{ secrets.APP_URL }}/api/internal/warm")
+          HTTP_STATUS=$(echo "$RESPONSE" | tail -1)
+          echo "Response ($HTTP_STATUS): $(echo "$RESPONSE" | head -1)"
+          if [ "$HTTP_STATUS" != "200" ]; then exit 1; fi

@@ -1,0 +1,327 @@
+# BUILD_SPEC.md — Sports Oracle
+
+Detailed implementation spec. Read CLAUDE.md first for project context.
+This document is the task list and technical spec for each remaining file.
+
+---
+
+## Phase 2 — Auth + key issuance
+
+### `src/lib/supabase.ts`
+
+Two exports: a browser client (anon key) and a server client (service role key).
+
+```ts
+// browser — safe in client components
+export const supabaseBrowser = createBrowserClient(url, anonKey)
+
+// server — NEVER use in client components
+export const supabaseServer = createClient(url, serviceRoleKey)
+```
+
+Use `@supabase/ssr` for the browser client.
+
+---
+
+### `src/lib/viem.ts`
+
+Read-only Base mainnet client. Used only to call `getStake(wallet)` on the staking contract.
+
+Requirements:
+- Use `createPublicClient` from viem with `http(process.env.ALCHEMY_BASE_RPC_URL)`
+- Export `getStake(walletAddress: string): Promise<bigint>`
+- Return value is raw bigint (wei). Divide by `10n ** 18n` to get $DARE amount.
+- Wrap in try/catch — if RPC fails, throw a descriptive error
+
+Minimal ABI:
+```ts
+const ABI = [
+  {
+    name: 'getStake',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [{ name: 'account', type: 'address' }],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
+] as const
+```
+
+---
+
+### `src/app/api/auth/verify-stake/route.ts`
+
+**Method:** POST
+**Auth:** Privy JWT (`Authorization: Bearer <privy_token>`)
+**Body:** `{ walletAddress: string }`
+
+Flow:
+1. Verify Privy JWT using Privy server SDK
+2. Extract `privyUserId` and `walletAddress`
+3. Check `staker_sessions` for fresh session — if fresh, return it without going on-chain
+4. Call `getStake(walletAddress)` via viem
+5. Convert bigint to $DARE (divide by 1e18)
+6. Determine tier:
+   - `< 10,000` DARE → `none`
+   - `>= 10,000` DARE → `scout`
+   - `>= 50,000` DARE → `analyst`
+   - `>= 200,000` DARE → `oracle`
+7. Upsert `staker_sessions` with `expires_at = now + 5 minutes`
+8. Upsert `users` (create if first login)
+9. Return `{ tier, stakeAmount, sportMask, wallet }`
+
+Sport mask: all sports for `analyst` and `oracle`. For `scout`, sports come from request body.
+
+---
+
+### `src/app/api/auth/keys/create/route.ts`
+
+**Method:** POST
+**Auth:** Privy JWT
+**Body:** `{ sportMask: string[] }`
+
+Flow:
+1. Verify Privy JWT
+2. Read fresh `staker_sessions` to confirm tier
+3. Validate `sportMask` — all values must be from the allowed sports list
+4. Generate raw key: `sk_live_` + `crypto.randomBytes(16).toString('hex')`
+5. Hash: `SHA-256(rawKey)` → store as `key_hash`
+6. Store `key_prefix` = first 12 chars of raw key
+7. Insert into `api_keys`
+8. Return `{ key: rawKey, prefix, tier, sportMask }` — shown ONCE, never stored
+
+Users can have multiple keys. Don't delete old keys on new key creation.
+
+---
+
+### `src/app/api/auth/keys/revoke/route.ts`
+
+**Method:** POST
+**Auth:** Privy JWT
+**Body:** `{ keyId: string }`
+
+Flow:
+1. Verify Privy JWT
+2. Confirm key belongs to this user
+3. Set `is_active = false`, `revoked_at = now()`
+4. Return `{ success: true }`
+
+Do NOT delete the row — keep for audit trail.
+
+---
+
+## Phase 3 — Sport endpoints
+
+All follow the same pattern as `scores/route.ts`. Copy it, change `dataType` and `cacheKey`.
+
+### `src/app/api/v1/[sport]/schedule/route.ts`
+
+- **Method:** GET
+- **Params:** `?season=2024`
+- **Cache key:** `{sport}:schedule:{season}`
+- **TTL:** 604800 (1 week)
+- **Sportradar params:** `{ season }`
+- **All tiers:** Yes
+
+---
+
+### `src/app/api/v1/[sport]/standings/route.ts`
+
+- **Method:** GET
+- **Params:** `?season=2024`
+- **Cache key:** `{sport}:standings:{season}`
+- **TTL:** 86400 (1 day)
+- **All tiers:** Yes
+- **Note:** Tennis uses `rankings` data type — handle as special case when `sport === 'tennis'`
+
+---
+
+### `src/app/api/v1/[sport]/roster/route.ts`
+
+- **Method:** GET
+- **Params:** `?team_id=abc123`
+- **Cache key:** `{sport}:roster:{team_id}`
+- **TTL:** 604800 (1 week)
+- **All tiers:** Yes
+- **Edge cases:**
+  - MMA: uses `fighters` data type, needs `fighter_id` not `team_id`
+  - NASCAR: uses `entries` data type, needs `race_id`
+  - Tennis: return 404 with helpful message — no roster concept
+  - Validate required params before calling Sportradar
+
+---
+
+### `src/app/api/v1/[sport]/live/route.ts`
+
+- **Method:** GET
+- **Params:** `?game_id=abc123` (required)
+- **Cache key:** `{sport}:live:{game_id}`
+- **TTL:** varies by sport (20s–120s)
+- **Tier gate:** `analyst` and `oracle` only — return 403 for `scout`
+- **Note:** Live always calls Sportradar on cache miss. Short TTL is intentional.
+
+---
+
+## Phase 4 — MCP server
+
+### `src/app/api/mcp/route.ts`
+
+MCP over HTTP. Each request is a JSON-RPC call.
+Auth: same `X-Oracle-Key` header. Call `gateway()` with sport from tool params.
+
+Tools:
+```ts
+const tools = {
+  get_scores:    { sport, date? },
+  get_schedule:  { sport, season? },
+  get_standings: { sport, season? },
+  get_roster:    { sport, team_id },
+  get_live:      { sport, game_id },
+  get_events:    { sport }
+}
+```
+
+MCP request shape:
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "get_scores",
+    "arguments": { "sport": "nba", "date": "2025-01-15" }
+  }
+}
+```
+
+MCP response shape:
+```json
+{
+  "content": [{ "type": "text", "text": "<json string of data>" }]
+}
+```
+
+Handle `tools/list` and `initialize` methods too.
+Use `@modelcontextprotocol/sdk` if available, otherwise implement manually.
+
+---
+
+## Phase 5 — Frontend
+
+### `src/app/layout.tsx`
+
+Wrap in Privy provider:
+```tsx
+<PrivyProvider appId={process.env.NEXT_PUBLIC_PRIVY_APP_ID} config={{ defaultChain: base }}>
+  {children}
+</PrivyProvider>
+```
+
+Enable `wallet` and `email` login methods. Set `defaultChain` to Base.
+
+---
+
+### `src/app/page.tsx`
+
+Developer-focused landing. No marketing fluff.
+
+Sections:
+1. Hero: "Sports data API for AI agents" + example API call
+2. Quick start: example request and response (static)
+3. Endpoints table
+4. Tier/staking table
+5. MCP connection guide
+
+No animations. Tailwind only.
+
+---
+
+### `src/app/dashboard/page.tsx`
+
+Requires Privy login. Redirect to `/` if not authenticated.
+
+Sections:
+1. Stake status: wallet, $DARE staked, tier badge, sports unlocked
+2. API keys list: prefix, tier, sport mask, last used, revoke button
+3. New key flow: sport selector → shows required stake → generate → show raw key once
+4. Usage stats: requests today/month, cache hit rate, avg latency
+
+---
+
+## Phase 6 — Hardening
+
+### Stake watcher
+GitHub Actions job every 10 minutes. Calls `POST /api/internal/refresh-sessions`.
+For each near-expiry session: re-read `getStake(wallet)`, update tier if changed, update `api_keys` if tier dropped.
+
+### Budget alert
+When `calls_made` crosses 80,000 — send Discord/Slack webhook.
+Add `POST /api/internal/budget-alert`. Trigger from cleanup job.
+
+### Live game window detection
+Before calling Sportradar for live data, check if a game is scheduled today using warm cache schedule data. If no game today, return immediately without burning a credit.
+
+---
+
+## Dependencies to install
+
+```bash
+npm install \
+  @supabase/supabase-js \
+  @supabase/ssr \
+  @privy-io/react-auth \
+  @privy-io/server-auth \
+  @upstash/ratelimit \
+  @upstash/redis \
+  viem \
+  @modelcontextprotocol/sdk
+```
+
+---
+
+## GitHub Actions secrets to set
+
+| Secret | Value |
+|---|---|
+| `NEXT_PUBLIC_SUPABASE_URL` | Supabase project URL |
+| `SUPABASE_ANON_KEY` | Supabase anon key |
+| `APP_URL` | Vercel deployment URL |
+| `INTERNAL_CRON_SECRET` | Same value as in `.env.local` |
+
+---
+
+## Vercel environment variables
+
+Add all vars from `.env.example`. Mark `SUPABASE_SERVICE_ROLE_KEY` and `SPORTRADAR_API_KEY` as server-only.
+
+---
+
+## Running locally
+
+```bash
+npm install
+cp .env.example .env.local
+# fill in values
+npm run dev
+
+# test scores endpoint
+curl -H "X-Oracle-Key: sk_live_yourkey" \
+  "http://localhost:3000/api/v1/nba/scores?date=2025-01-15"
+
+# test internal warm
+curl -X POST \
+  -H "x-internal-secret: your_secret" \
+  -H "Content-Type: application/json" \
+  -d '{"sport":"mma","types":["events","schedule"]}' \
+  "http://localhost:3000/api/internal/warm"
+```
+
+---
+
+## Decisions already made — don't re-litigate
+
+- No Railway. Vercel + GitHub Actions only.
+- One `sports_cache` table. `cache_key` handles namespacing.
+- `sport_mask` as text array on `api_keys`. No join table.
+- `INTERNAL_CRON_SECRET` for internal routes. Simple shared secret.
+- Raw API key shown once. SHA-256 hash stored. No recovery — user makes a new key.
+- MMA and NASCAR first for testing — infrequent events, low credit cost.
+- 7s Sportradar timeout. Vercel hobby = 10s limit.
+- Privy for auth. Don't build custom auth.

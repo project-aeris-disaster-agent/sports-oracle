@@ -1,0 +1,90 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "sports-oracle",
+      "cwd": "E:\\NPC\\01 DAREDEVIL\\OracleV2",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "port": 3000,
+      "autoPort": true
+    },
+    {
+      "name": "aeris-chat",
+      "cwd": "E:\\NPC\\06 AERIS CHAT",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "port": 3000
+    },
+    {
+      "name": "aeris-dashboard",
+      "cwd": "E:\\NPC\\06 AERIS DASHBOARD",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "port": 3000
+    },
+    {
+      "name": "v2-terminal-fifa",
+      "cwd": "E:\\NPC\\01 DAREDEVIL\\Terminal v2 FIFA\\v2-terminal",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "port": 5173
+    },
+    {
+      "name": "v2-terminal",
+      "cwd": "E:\\NPC\\01 DAREDEVIL\\V2 Terminal",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "port": 5173
+    },
+    {
+      "name": "eliza-dd-frontend",
+      "cwd": "E:\\NPC\\01 DAREDEVIL\\ELIZA_DD_FRONTEND",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "port": 5173
+    },
+    {
+      "name": "daredevil-oracle-app",
+      "cwd": "E:\\NPC\\01 DAREDEVIL\\RESEARCH PAPER\\daredevil-oracle-app",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "port": 5173
+    },
+    {
+      "name": "daredevil-content-api",
+      "cwd": "E:\\NPC\\01 DAREDEVIL\\RESEARCH PAPER\\daredevil-content-api",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "port": 3847
+    },
+    {
+      "name": "request-knowledge-app",
+      "cwd": "E:\\NPC\\00 REQUEST",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "port": 5173
+    },
+    {
+      "name": "request-api",
+      "cwd": "E:\\NPC\\00 REQUEST\\server",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "port": 8787
+    },
+    {
+      "name": "sona-bio",
+      "cwd": "E:\\NPC\\05 AGENT TERMINAL\\SONA",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "port": 5173
+    },
+    {
+      "name": "bucal-league",
+      "cwd": "E:\\NPC\\01 DAREDEVIL\\BUCAL",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "port": 5173
+    }
+  ]
+}

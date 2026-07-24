@@ -1,0 +1,37 @@
+# .github/workflows/supabase-keepalive.yml
+# Prevents Supabase free tier from pausing due to inactivity.
+# Runs every 3 days. Must exist before anything else goes live.
+
+name: Supabase keep-alive
+
+on:
+  schedule:
+    - cron: '0 8 */3 * *'   # Every 3 days at 08:00 UTC
+  workflow_dispatch:          # Allow manual trigger from GitHub UI
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Ping Supabase REST API
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "apikey: ${{ secrets.SUPABASE_ANON_KEY }}" \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_ANON_KEY }}" \
+            "${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}/rest/v1/sportradar_budget?select=month&limit=1")
+
+          echo "Supabase ping status: $STATUS"
+
+          if [ "$STATUS" != "200" ]; then
+            echo "ERROR: Supabase returned $STATUS — project may be paused or misconfigured"
+            exit 1
+          fi
+
+          echo "Supabase is alive"
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "ALERT: Supabase keep-alive failed. Check project status at https://supabase.com/dashboard"

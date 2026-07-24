@@ -1,0 +1,181 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Sports Oracle — console/analog theme.
+
+   Palette is deliberately narrow: blue carries all brand and interaction weight,
+   white carries text, black carries surface. Red/amber/green are reserved
+   EXCLUSIVELY for state indication, so a coloured dot always means something.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+:root {
+  --bg:          #000000;
+  --panel:       #07090d;
+  --panel-2:     #0b0f16;
+  --edge:        #16202e;
+  --edge-hot:    #1e3a5f;
+
+  --blue:        #2f81f7;
+  --blue-bright: #58a6ff;
+  --blue-deep:   #0d2847;
+
+  --text:        #ffffff;
+  --text-dim:    #8b98a8;
+  --text-faint:  #55606e;
+
+  --font-ui:   ui-sans-serif, system-ui, -apple-system, "Segoe UI Variable Text",
+               "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas,
+               "Roboto Mono", "Liberation Mono", monospace;
+}
+
+html {
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  font-family: var(--font-ui);
+  color: var(--text);
+  background: var(--bg);
+  /* Faint vignette + grid: reads as a backlit instrument panel rather than a
+     flat web page, without costing an image request. */
+  background-image:
+    radial-gradient(ellipse 120% 80% at 50% -10%, rgba(47,129,247,0.10), transparent 60%),
+    linear-gradient(rgba(255,255,255,0.016) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,0.016) 1px, transparent 1px);
+  background-size: 100% 100%, 44px 44px, 44px 44px;
+  background-attachment: fixed;
+}
+
+/* Scanline overlay — subtle enough to read as texture, not as noise. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+  background: repeating-linear-gradient(
+    180deg,
+    rgba(255,255,255,0.014) 0px,
+    rgba(255,255,255,0.014) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+}
+
+/* ─── Typography primitives ───────────────────────────────────────────────── */
+
+.mono { font-family: var(--font-mono); }
+
+/* Micro-labels above panel sections — the printed legend on a hardware fascia. */
+.legend {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.display {
+  font-weight: 700;
+  letter-spacing: -0.022em;
+}
+
+/* ─── Panel surfaces ──────────────────────────────────────────────────────── */
+
+.panel {
+  background:
+    linear-gradient(180deg, var(--panel-2) 0%, var(--panel) 100%);
+  border: 1px solid var(--edge);
+  border-radius: 10px;
+  position: relative;
+}
+
+/* Top highlight — the light-catch edge on a bezel. */
+.panel::after {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 1px;
+  border-radius: 10px 10px 0 0;
+  background: linear-gradient(90deg, transparent, rgba(88,166,255,0.28), transparent);
+  pointer-events: none;
+}
+
+.panel-hover {
+  transition: border-color 140ms ease, background-color 140ms ease;
+}
+.panel-hover:hover { border-color: var(--edge-hot); }
+
+/* ─── Status LEDs ─────────────────────────────────────────────────────────── */
+
+.led {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  flex: none;
+  position: relative;
+}
+
+/* Slow breathing pulse for the live/online state — an idling instrument. */
+@keyframes led-breathe {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.55; }
+}
+.led-pulse { animation: led-breathe 2.6s ease-in-out infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .led-pulse { animation: none; }
+}
+
+/* ─── Controls ────────────────────────────────────────────────────────────── */
+
+.btn-primary {
+  background: var(--blue);
+  color: #ffffff;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  border: 1px solid var(--blue-bright);
+  box-shadow: 0 0 0 1px rgba(47,129,247,0.16), 0 6px 18px -8px rgba(47,129,247,0.85);
+  transition: background-color 130ms ease, box-shadow 130ms ease, transform 90ms ease;
+}
+.btn-primary:hover {
+  background: var(--blue-bright);
+  box-shadow: 0 0 0 1px rgba(88,166,255,0.34), 0 8px 24px -8px rgba(88,166,255,0.95);
+}
+.btn-primary:active { transform: translateY(1px); }
+
+.btn-ghost {
+  border: 1px solid var(--edge);
+  color: var(--text-dim);
+  transition: border-color 130ms ease, color 130ms ease;
+}
+.btn-ghost:hover { border-color: var(--edge-hot); color: var(--text); }
+
+.btn-primary:focus-visible,
+.btn-ghost:focus-visible,
+.row-toggle:focus-visible {
+  outline: 2px solid var(--blue-bright);
+  outline-offset: 2px;
+}
+
+/* ─── Code blocks ─────────────────────────────────────────────────────────── */
+
+.code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.65;
+  background: #05070a;
+  border: 1px solid var(--edge);
+  border-radius: 8px;
+  overflow-x: auto;
+}
+
+.row-toggle { cursor: pointer; width: 100%; text-align: left; }
+
+/* Keep content above the scanline overlay. */
+main, header, footer { position: relative; z-index: 2; }

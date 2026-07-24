@@ -1,0 +1,40 @@
+# .github/workflows/stake-watcher.yml
+# Re-reads on-chain stake for every active commitment and revokes keys whose
+# stake has been withdrawn.
+#
+# This is the only thing that notices an unstake between dashboard visits, so it
+# is a security control, not a housekeeping job. A failure here means paid access
+# outlives the stake that paid for it — hence the explicit failure notice.
+
+name: Stake watcher
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'   # every 10 minutes
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Audit active stake commitments
+        run: |
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+            -H "x-internal-secret: ${{ secrets.INTERNAL_CRON_SECRET }}" \
+            "${{ secrets.APP_URL }}/api/internal/refresh-stakes")
+
+          HTTP_STATUS=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | head -n -1)
+
+          echo "status: $HTTP_STATUS"
+          echo "$BODY"
+
+          if [ "$HTTP_STATUS" != "200" ]; then
+            echo "::error::Stake watcher failed — paid keys may outlive their stake."
+            exit 1
+          fi
+
+      - name: Notify on failure
+        if: failure()
+        run: echo "::warning::Stake audit did not complete. Investigate before the next cycle."

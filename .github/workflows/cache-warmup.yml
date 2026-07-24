@@ -1,0 +1,126 @@
+# .github/workflows/cache-warmup.yml
+# Calls /api/internal/warm to pre-populate cache for each sport.
+#
+# The warm endpoint works in ENDPOINT PATH space and skips anything a sport does
+# not offer, so listing a path that no sport exposes is not an error — it is just
+# a line that has never done anything. Three such lines had accumulated here; see
+# the notes on each `types` array below. Verified against the live manifest, not
+# assumed: every path listed now warms for at least one sport in its matrix.
+
+name: Cache warm-up
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'      # Weekly Monday 06:00 UTC — cold data
+    - cron: '0 */6 * * *'    # Every 6 hours — warm data + cleanup
+    - cron: '0 12-23 * * *'  # Pre-game window (US game times)
+  workflow_dispatch:
+    inputs:
+      sport:
+        description: 'Sport to warm (leave blank or "all" for every sport)'
+        required: false
+        default: 'all'
+      force:
+        description: 'Force refresh even if cache is fresh'
+        required: false
+        default: 'false'
+
+jobs:
+  warm-cold-data:
+    name: Warm cold data (weekly)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'schedule' && github.event.schedule == '0 6 * * 1')
+    strategy:
+      max-parallel: 2
+      fail-fast: false
+      matrix:
+        sport: [nhl, nfl, mlb, nba, wnba, tennis, mma, soccer, f1]
+    steps:
+      - name: Warm ${{ matrix.sport }} cold data
+        env:
+          REQUESTED: ${{ github.event.inputs.sport }}
+          SPORT:     ${{ matrix.sport }}
+          FORCE:     ${{ github.event.inputs.force || 'false' }}
+          SECRET:    ${{ secrets.INTERNAL_CRON_SECRET }}
+          APP_URL:   ${{ secrets.APP_URL }}
+        run: |
+          # The dispatch input is a FILTER, never the sport itself. Assigning it
+          # directly used to post {"sport":"all"} on a default manual run, which
+          # the API answers with 404 Unknown sport — so every manual dispatch
+          # failed at the default setting.
+          if [ -n "$REQUESTED" ] && [ "$REQUESTED" != "all" ] && [ "$REQUESTED" != "$SPORT" ]; then
+            echo "Skipping $SPORT (dispatch requested '$REQUESTED')"; exit 0
+          fi
+          # `roster` was here and could never warm: it keys on a caller-supplied
+          # team_id, so a blind pre-fetch has no id to use and the endpoint skips
+          # itself every run. `teams` and `leaders` take no id and do warm.
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+            -H "Content-Type: application/json" \
+            -H "x-internal-secret: $SECRET" \
+            -d "{\"sport\":\"$SPORT\",\"types\":[\"schedule\",\"standings\",\"teams\",\"leaders\"],\"force\":$FORCE}" \
+            "$APP_URL/api/internal/warm")
+          HTTP_STATUS=$(echo "$RESPONSE" | tail -1)
+          echo "Response ($HTTP_STATUS): $(echo "$RESPONSE" | head -1)"
+          if [ "$HTTP_STATUS" != "200" ]; then exit 1; fi
+
+  warm-daily-data:
+    name: Warm daily data
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    strategy:
+      max-parallel: 3
+      fail-fast: false
+      matrix:
+        sport: [nhl, nfl, mlb, nba, wnba, tennis, mma, soccer, f1]
+    steps:
+      - name: Warm ${{ matrix.sport }} daily data
+        env:
+          REQUESTED: ${{ github.event.inputs.sport }}
+          SPORT:     ${{ matrix.sport }}
+          FORCE:     ${{ github.event.inputs.force || 'false' }}
+          SECRET:    ${{ secrets.INTERNAL_CRON_SECRET }}
+          APP_URL:   ${{ secrets.APP_URL }}
+        run: |
+          if [ -n "$REQUESTED" ] && [ "$REQUESTED" != "all" ] && [ "$REQUESTED" != "$SPORT" ]; then
+            echo "Skipping $SPORT (dispatch requested '$REQUESTED')"; exit 0
+          fi
+          # `lineups` was here and is not an endpoint on ANY sport — it skipped in
+          # all nine jobs on every run since the workflow was written.
+          #
+          # `injuries` warms the league-wide feed for NBA/NHL/MLB/WNBA. NFL scopes
+          # injuries by week, which a blind pre-fetch cannot supply, so it reports
+          # `skipped (needs week)` rather than erroring — NFL injuries are reached
+          # on demand through /api/v1/nfl/injuries?week=N.
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+            -H "Content-Type: application/json" \
+            -H "x-internal-secret: $SECRET" \
+            -d "{\"sport\":\"$SPORT\",\"types\":[\"scores\",\"events\",\"injuries\",\"changes\",\"transactions\",\"free-agents\"],\"force\":$FORCE}" \
+            "$APP_URL/api/internal/warm")
+          HTTP_STATUS=$(echo "$RESPONSE" | tail -1)
+          echo "Response ($HTTP_STATUS): $(echo "$RESPONSE" | head -1)"
+
+  cleanup:
+    name: Cleanup expired cache + old logs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Pinned to the 6-hourly cron. Previously this matched every trigger, so the
+    # hourly pre-game cron ran it ~16 times a day to delete rows that had already
+    # been deleted.
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *')
+    steps:
+      - name: Run cleanup
+        env:
+          SECRET:  ${{ secrets.INTERNAL_CRON_SECRET }}
+          APP_URL: ${{ secrets.APP_URL }}
+        run: |
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+            -H "x-internal-secret: $SECRET" \
+            "$APP_URL/api/internal/cleanup")
+          HTTP_STATUS=$(echo "$RESPONSE" | tail -1)
+          echo "Cleanup ($HTTP_STATUS): $(echo "$RESPONSE" | head -1)"

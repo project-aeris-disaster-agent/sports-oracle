@@ -1,0 +1,380 @@
+# CLAUDE.md — Sports Oracle
+
+This file is the source of truth for Claude Code. Read it fully before touching any file.
+
+---
+
+## What this project is
+
+**Sports Oracle** is a sports data middleware platform. It sits between the Sportradar production API and AI agents/consumers, caching data in Supabase and serving it via a REST API and MCP server. Users stake `$DARE` tokens on Base to get API access. The staking contract is already deployed.
+
+The core value: AI agents get cheap, fast sports data. We protect a 100K/month Sportradar token budget by being cache-first and only calling Sportradar when data is genuinely stale or live.
+
+---
+
+## Stack
+
+| Layer | Technology |
+|---|---|
+| Framework | Next.js 14 App Router (TypeScript) |
+| Database + Auth | Supabase (Postgres, RLS, server functions) |
+| Frontend auth | Privy (wallet + email login) |
+| Rate limiting | Upstash Redis |
+| Blockchain reads | viem (read-only, Base mainnet) |
+| Hosting | Vercel (hobby/free tier) |
+| Background jobs | GitHub Actions (cron) |
+| Sports data | Sportradar (one API key, all sports) |
+| Chain | Base mainnet (chain ID 8453) |
+
+No Railway. No separate backend server. No persistent processes.
+Everything is either a Vercel serverless function or a GitHub Actions job.
+
+---
+
+## Environment variables
+
+All secrets live in `.env.local` (never committed). See `.env.example` for the full list.
+
+Critical ones to know:
+- `SUPABASE_SERVICE_ROLE_KEY` — server-only, never use in client components
+- `SPORTRADAR_API_KEY` — server-only, never expose
+- `INTERNAL_CRON_SECRET` — shared secret between GitHub Actions and `/api/internal/*` routes
+- `NEXT_PUBLIC_PRIVY_APP_ID` — safe for client
+- `STAKING_CONTRACT_ADDRESS` — the deployed $DARE staking contract on Base
+
+---
+
+## Project structure
+sports-oracle/
+
+├── .env.example
+
+├── .env.local
+
+├── .github/
+
+│   └── workflows/
+
+│       ├── supabase-keepalive.yml
+
+│       └── cache-warmup.yml
+
+├── supabase/
+
+│   └── migrations/
+
+│       ├── 001_core_tables.sql
+
+│       ├── 002_rls_and_functions.sql
+
+│       └── 003_seed_and_views.sql
+
+├── src/
+
+│   ├── lib/
+
+│   │   ├── sportradar.ts
+
+│   │   ├── supabase.ts
+
+│   │   ├── viem.ts
+
+│   │   └── utils.ts
+
+│   ├── middleware/
+
+│   │   └── gateway.ts
+
+│   └── app/
+
+│       ├── layout.tsx
+
+│       ├── page.tsx
+
+│       ├── dashboard/
+
+│       │   └── page.tsx
+
+│       └── api/
+
+│           ├── internal/
+
+│           │   ├── warm/route.ts
+
+│           │   └── cleanup/route.ts
+
+│           ├── auth/
+
+│           │   ├── verify-stake/route.ts
+
+│           │   └── keys/
+
+│           │       ├── create/route.ts
+
+│           │       └── revoke/route.ts
+
+│           ├── v1/
+
+│           │   └── [sport]/
+
+│           │       ├── scores/route.ts     ✅ built
+
+│           │       ├── schedule/route.ts
+
+│           │       ├── standings/route.ts
+
+│           │       ├── roster/route.ts
+
+│           │       └── live/route.ts
+
+│           └── mcp/
+
+│               └── route.ts
+
+---
+
+## Database schema (Supabase)
+
+Six tables. All migrations are in `supabase/migrations/` and have been run.
+
+### `users`
+Created on first Privy login. `privy_id` is the Privy user ID. `wallet` is lowercase Base address.
+
+### `staker_sessions`
+One row per wallet. `expires_at = verified_at + 5 minutes`. The gateway checks this before going on-chain. `tier` is one of: `none`, `scout`, `analyst`, `oracle`.
+
+### `api_keys`
+`key_hash` = SHA-256 of raw key (raw key never stored). `key_prefix` = first 12 chars shown in dashboard. `sport_mask` = text array e.g. `['nhl','nfl','mma']`.
+
+### `sports_cache`
+`cache_key` pattern: `{sport}:{data_type}:{qualifier}` e.g. `nhl:scores:2025-01-15`. `payload` = raw Sportradar JSON. `expires_at` drives freshness.
+
+### `sportradar_budget`
+One row per calendar month. `calls_made` increments on every Sportradar call. At 90K calls, `cache_only` flips to true and the dispatcher stops calling Sportradar until next month.
+
+### `usage_log`
+One row per API request. `cache_hit = true` means Sportradar was not called. Auto-cleaned after 90 days.
+
+### Server functions (called via `supabase.rpc()`)
+- `verify_api_key(raw_key)` — hashes key, returns key metadata
+- `get_cached(cache_key)` — returns payload if not expired, null if stale
+- `upsert_cache(...)` — insert or update a cache entry
+- `increment_budget()` — atomic counter, returns false if budget full
+- `check_budget()` — returns true if calls are still allowed
+- `log_request(...)` — fire-and-forget usage logging
+- `cleanup_expired_cache()` — deletes rows expired > 24h ago
+- `cleanup_old_usage_logs()` — deletes usage_log rows > 90 days
+
+---
+
+## Supported sports
+
+| Key | Sport | Live TTL | Notes |
+|---|---|---|---|
+| `nhl` | NHL | 30s | |
+| `nfl` | NFL | 45s | |
+| `mlb` | MLB | 30s | has `lineups` data type |
+| `nba` | NBA | 20s | fastest refresh |
+| `wnba` | WNBA | 30s | |
+| `tennis` | Tennis | 60s | `rankings` not `standings` |
+| `nascar` | NASCAR | 60s | `entries` not `roster` |
+| `nba_gleague` | NBA G League | 30s | |
+| `mma` | MMA | 120s | events are weekly |
+
+All sport keys are lowercase. The `[sport]` dynamic route handles all sports from one file.
+
+---
+
+## Staking tiers
+
+| Tier | Min stake | Req/min | Cache access | Live data |
+|---|---|---|---|---|
+| `scout` | 10K $DARE | 30 | Cold + warm | No |
+| `analyst` | 50K $DARE | 150 | All | Yes |
+| `oracle` | 200K $DARE | 600 | All + priority | Yes + webhooks |
+
+Tier is determined at stake verification time and stored in `staker_sessions` and `api_keys`.
+
+---
+
+## Auth flow (Privy → Base → API key)
+
+1. User logs in via Privy (wallet or email)
+2. User selects sports they want access to
+3. Frontend shows required $DARE stake for their selection
+4. User stakes via the staking contract UI (already deployed)
+5. `POST /api/auth/verify-stake` — reads `getStake(wallet)` from Base contract via viem
+6. Result cached in `staker_sessions` (5-min TTL)
+7. `POST /api/auth/keys/create` — generates `sk_live_...` key, stores SHA-256 hash in `api_keys`
+8. Key shown to user once — not stored in plaintext anywhere
+
+---
+
+## Gateway middleware (every `/api/v1/*` request)
+
+Located at `src/middleware/gateway.ts`. Call it first in every route handler:
+
+```ts
+const auth = await gateway(req, sport)
+if (auth instanceof NextResponse) return auth
+const { context } = auth
+// context.keyId, context.userId, context.wallet, context.tier, context.sportMask
+```
+
+Order inside gateway:
+1. Extract `X-Oracle-Key` header
+2. `verify_api_key()` via Supabase RPC
+3. Rate limit via Upstash (tier-based sliding window)
+4. Sport access check (`sport_mask.includes(sport)`)
+5. Update `last_used_at` (non-blocking)
+
+---
+
+## Sportradar client (`src/lib/sportradar.ts`)
+
+All Sportradar calls go through `fetchSportradar()` or `fetchAndCache()`. Never call Sportradar directly from a route handler.
+
+Key rules:
+- 7s fetch timeout (Vercel hobby limit is 10s)
+- Always checks `check_budget()` before fetching
+- Calls `increment_budget()` after a successful fetch (non-blocking)
+- `fetchAndCache()` writes result to Supabase automatically
+
+Cache-first pattern used in every route:
+```ts
+const { data: cached } = await supabase.rpc('get_cached', { p_cache_key: cacheKey })
+if (cached) return cached
+
+const result = await fetchAndCache({ sport, dataType, params }, cacheKey, ttlSeconds)
+```
+
+---
+
+## Internal routes (GitHub Actions only)
+
+Protected by `INTERNAL_CRON_SECRET` header (`x-internal-secret`). Use `guardInternal(req)` at the top of every internal route.
+
+- `POST /api/internal/warm` — warms cache for a sport + data types
+- `POST /api/internal/cleanup` — deletes expired cache rows and old logs
+
+---
+
+## MCP server (`/api/mcp`) — not yet built
+
+Tools to expose:
+get_scores(sport, date?)
+
+get_schedule(sport, season?)
+
+get_standings(sport, season?)
+
+get_roster(sport, team_id)
+
+get_live(sport, game_id)
+
+get_events(sport)
+Auth: same `X-Oracle-Key` header as REST API. MCP route calls `gateway()` before handling any tool call.
+
+---
+
+## What's built ✅
+
+- `supabase/migrations/001_core_tables.sql`
+- `supabase/migrations/002_rls_and_functions.sql`
+- `supabase/migrations/003_seed_and_views.sql`
+- `src/lib/sportradar.ts`
+- `src/middleware/gateway.ts`
+- `src/app/api/v1/[sport]/scores/route.ts`
+- `src/app/api/internal/warm/route.ts`
+- `src/app/api/internal/cleanup/route.ts`
+- `.github/workflows/supabase-keepalive.yml`
+- `.github/workflows/cache-warmup.yml`
+- `.env.example`
+
+---
+
+## What to build next (in order)
+
+### Phase 2 — Auth + key issuance
+- [ ] `src/lib/viem.ts`
+- [ ] `src/lib/supabase.ts`
+- [ ] `src/app/api/auth/verify-stake/route.ts`
+- [ ] `src/app/api/auth/keys/create/route.ts`
+- [ ] `src/app/api/auth/keys/revoke/route.ts`
+
+### Phase 3 — Remaining sport endpoints
+- [ ] `src/app/api/v1/[sport]/schedule/route.ts`
+- [ ] `src/app/api/v1/[sport]/standings/route.ts`
+- [ ] `src/app/api/v1/[sport]/roster/route.ts`
+- [ ] `src/app/api/v1/[sport]/live/route.ts`
+
+### Phase 4 — MCP server
+- [ ] `src/app/api/mcp/route.ts`
+
+### Phase 5 — Frontend
+- [ ] Privy provider in `layout.tsx`
+- [ ] `src/app/dashboard/page.tsx`
+- [ ] `src/app/page.tsx`
+
+### Phase 6 — Hardening
+- [ ] Stake watcher job
+- [ ] Budget alert at 80%
+- [ ] Live game window detection
+
+---
+
+## Critical rules — never break these
+
+1. Never call Sportradar from client-side code. Server routes only.
+2. Never store raw API keys. Hash with SHA-256. Show raw key to user once only.
+3. Always check budget before calling Sportradar. Use `check_budget()` or go through `fetchSportradar()`.
+4. Always call `gateway()` first in every `/api/v1/*` route. No exceptions.
+5. Never use `SUPABASE_SERVICE_ROLE_KEY` in client components.
+6. Live endpoint is tier-gated. `scout` gets a 403. Check `context.tier` before serving live data.
+7. Set fetch timeouts. Vercel hobby = 10s max. All Sportradar calls use 7s timeout.
+8. `sport_mask` is always lowercase. `['nhl', 'nfl']` not `['NHL', 'NFL']`.
+9. Supabase keep-alive must stay active. Free tier pauses after 1 week idle.
+10. `INTERNAL_CRON_SECRET` guards all `/api/internal/*` routes. Always call `guardInternal(req)` first.
+
+---
+
+## Common patterns
+
+### Standard route handler
+```ts
+export async function GET(req: NextRequest, { params }: { params: { sport: string } }) {
+  const sport = params.sport.toLowerCase()
+
+  const auth = await gateway(req, sport)
+  if (auth instanceof NextResponse) return auth
+  const { context } = auth
+
+  const cacheKey = `${sport}:scores:${date}`
+
+  const { data: cached } = await supabase.rpc('get_cached', { p_cache_key: cacheKey })
+  if (cached) {
+    logRequest(context.keyId, context.userId, sport, 'scores', true, latency)
+    return NextResponse.json({ data: cached, meta: { source: 'cache' } })
+  }
+
+  const result = await fetchAndCache({ sport, dataType: 'scores', params }, cacheKey, ttl)
+  return NextResponse.json({ data: result.data, meta: { source: 'sportradar' } })
+}
+```
+
+### Tier gate
+```ts
+if (context.tier === 'scout') {
+  return NextResponse.json(
+    { error: 'Live data requires Analyst tier or above. Stake 50K $DARE to unlock.' },
+    { status: 403 }
+  )
+}
+```
+
+### Non-blocking fire-and-forget
+```ts
+supabase.rpc('log_request', { ... }).then(({ error }) => {
+  if (error) console.error('[log]', error.message)
+})
+```
