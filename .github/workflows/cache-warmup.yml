@@ -102,6 +102,7 @@ jobs:
             "$APP_URL/api/internal/warm")
           HTTP_STATUS=$(echo "$RESPONSE" | tail -1)
           echo "Response ($HTTP_STATUS): $(echo "$RESPONSE" | head -1)"
+          if [ "$HTTP_STATUS" != "200" ]; then exit 1; fi
 
   cleanup:
     name: Cleanup expired cache + old logs
