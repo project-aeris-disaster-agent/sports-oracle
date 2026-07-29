@@ -44,7 +44,7 @@ import type { ProviderId } from '@/lib/providers'
  * outcomes have been mapped to the settlement contract below. Adding one means
  * writing a mapper, not touching the routes.
  */
-export const RESOLVABLE = ['f1', 'soccer', 'dota2']
+export const RESOLVABLE = ['f1', 'soccer', 'dota2', 'agentfighter']
 
 export type ResolutionStatus =
   | 'scheduled'    // event exists, has not started
@@ -674,6 +674,344 @@ export function eventsFromOpenDota(sport: string, payload: unknown): EventRef[] 
 export function findDotaMatch(payload: unknown, matchId: string): DotaMatch | null {
   const rows = Array.isArray(payload) ? payload as DotaMatch[] : []
   return rows.find(m => m.match_id === matchId) ?? null
+}
+
+// ─── Agent Fighter ───────────────────────────────────────────────────────────
+//
+// The cleanest source in this file to map, because it was built for settlement
+// rather than adapted to it. `resolution.settlement` is an explicit three-state
+// field and it is the ONLY thing that gates `official` here:
+//
+//   final       the result can never change      -> official
+//   void        no contest, refund               -> void (settleable as void)
+//   provisional not yet re-simulated             -> provisional, NEVER settle
+//
+// No ageing rule, unlike Dota 2. The six-hour window there exists because
+// OpenDota's payload cannot distinguish a first parse from a settled one, so we
+// infer confidence from elapsed time. Agent Fighter tells us directly, so
+// inferring it again would only add latency. See providers/agentfighter.ts.
+//
+// ─── Where this layer stops: forfeits ────────────────────────────────────────
+// The upstream is explicit that a forfeit is reported as `outcome: decided`,
+// `method: forfeit`, `settlement: final` — in Agent Fighter, leaving a wager
+// loses it by design. Its documentation says: "Many books void forfeits under
+// their own rules. We state what happened; you choose what to pay."
+//
+// That is exactly the boundary declared at the top of this file. A forfeit
+// therefore resolves as a DECIDED WIN with the method carried in `status` and a
+// note naming it. Voiding it here would be this layer inventing a house rule and
+// silently imposing it on every market built on the API.
+//
+// ─── Two ways a result can be true but unpriceable ───────────────────────────
+// Both are surfaced in `notes` rather than in the flag, because both are facts
+// about the match, not about whether the outcome is known:
+//
+//   verified: false     the winner was awarded because a side vanished, NOT by
+//                       re-simulating the ledger. The result stands; the
+//                       cryptographic guarantee does not apply to it.
+//   rated: false        arcade / solo / friendly material. The platform runs far
+//                       more practice than wagers, and a market priced on
+//                       exhibition play is priced on noise.
+
+/** One side of a match. Agent Fighter is 1v1, so there are exactly two. */
+export interface AFPlayer {
+  handle?:     string
+  name?:       string
+  character?:  string
+  is_agent?:   boolean
+  rounds_won?: number
+  won?:        boolean
+}
+
+export interface AFResolutionBlock {
+  outcome?:     string   // closed enum: decided | draw | no_contest
+  method?:      string   // OPEN enum — never switch exhaustively on this
+  settlement?:  string   // closed enum: final | void | provisional
+  winner_side?: number | null
+  verified?:    boolean
+  desync_side?: number | null
+}
+
+/** The projected shape from providers/agentfighter.ts — one form for both endpoints. */
+export interface AFMatch {
+  id?:         string
+  played_at?:  string
+  season?:     number
+  mode?:       string
+  rated?:      boolean
+  stakes?:     { entry_fee?: number; pot?: number; currency?: string }
+  players?:    AFPlayer[]
+  resolution?: AFResolutionBlock
+  duration?:   { ticks?: number; seconds?: number }
+  verification?: { engine?: string; state_hash?: string; verified?: boolean; desync_side?: number | null }
+}
+
+/** Reads the array out of the projected `{ matches: [...] }` envelope. */
+export function agentFighterMatches(payload: unknown): AFMatch[] {
+  const d = payload as { matches?: unknown }
+  return Array.isArray(d?.matches) ? (d.matches as AFMatch[]) : []
+}
+
+export function findAgentFighterMatch(payload: unknown, matchId: string): AFMatch | null {
+  return agentFighterMatches(payload).find(m => m.id === matchId) ?? null
+}
+
+const afLabel = (p: AFPlayer | undefined, idx: number): string =>
+  p?.name ?? p?.handle ?? `Side ${idx}`
+
+const afName = (m: AFMatch): string => {
+  const p = m.players ?? []
+  return `${afLabel(p[0], 0)} vs ${afLabel(p[1], 1)}`
+}
+
+/** Methods where the losing side did not play the match to a conclusion. */
+const AF_FORFEIT = /forfeit/i
+
+function afSide(
+  p:   AFPlayer,
+  idx: number,
+  ctx: {
+    resolved:   boolean
+    draw:       boolean
+    won:        boolean
+    method:     string
+    desyncSide: number | null
+  }
+): Competitor {
+  const { resolved, draw, won, method, desyncSide } = ctx
+  const convicted = desyncSide === idx
+  const forfeited = AF_FORFEIT.test(method) && !won
+
+  const status =
+    !resolved  ? 'No contest'
+    : convicted ? 'Desync conviction — reported state diverged from the server re-simulation'
+    : draw      ? 'Draw'
+    : won       ? `Won (${method})`
+    :             `Lost (${method})`
+
+  return {
+    competitor_id: p.handle ?? String(idx),
+    name:          afLabel(p, idx),
+
+    // The selected fighter, carried in the team slot.
+    //
+    // A stretch on the word "team", so it is worth defending: the contract calls
+    // this the "constructor / team / club" slot, i.e. what the competitor brought
+    // rather than who they are. Character selection is exactly that, and it is a
+    // first-class market dimension here — the upstream publishes per-character
+    // win rates and pick rates precisely because it is modelled. Putting it here
+    // lets /resolve answer "which fighter won" without a second call. There are
+    // no team markets in a 1v1 game for this to be confused with.
+    team_id:       p.character ?? null,
+    team:          p.character ?? null,
+
+    position:      !resolved ? null : draw ? 1 : won ? 1 : 2,
+    position_text: !resolved ? ''   : draw ? 'D' : won ? 'W' : 'L',
+    status,
+
+    // "Played it to a conclusion." False for a walkout and for an anti-cheat
+    // conviction — in both cases the result stands but the match did not finish
+    // on its own terms, which is the distinction a book needs to apply its own
+    // forfeit rule.
+    finished:      resolved && !convicted && !forfeited,
+    // Every row this API serves is a match that was played. There is no
+    // scheduled or no-show state to represent.
+    started:       true,
+
+    laps:          null,
+    // Side index, 1-based. The same use soccer makes of this field for
+    // home/away — it is the only positional information a 1v1 match carries.
+    grid:          idx + 1,
+    // Rounds won. The scoreline, not a series score.
+    points:        p.rounds_won ?? null,
+  }
+}
+
+export function fromAgentFighter(sport: string, m: AFMatch | null): Resolution | null {
+  if (!m || !m.id) return null
+
+  const observedAt = new Date().toISOString()
+  const r          = m.resolution ?? {}
+  const players    = Array.isArray(m.players) ? m.players : []
+
+  const settlement = r.settlement
+  const outcome    = r.outcome
+  const method     = r.method ?? 'unspecified'
+  const desyncSide = typeof r.desync_side === 'number' ? r.desync_side : null
+
+  // `final` and `void` are the only values that may produce a settleable
+  // response. Anything else — `provisional`, or a value this build has never
+  // seen — is withheld. A settlement enum that grows must never fail open.
+  const isFinal = settlement === 'final'
+  const voided  = settlement === 'void' || (isFinal && outcome === 'no_contest')
+  const draw    = isFinal && outcome === 'draw'
+
+  // Whether the match produced a placeable order. Reported even while
+  // provisional — the positions are facts; `official` is what gates settlement.
+  const resolved = !voided && (outcome === 'decided' || outcome === 'draw')
+
+  const winnerSide = typeof r.winner_side === 'number' ? r.winner_side : null
+
+  // Two independent statements of who won: `resolution.winner_side` and the
+  // per-player `won` flag. They should never disagree. If they do, something
+  // upstream is inconsistent and no market may settle on it — cheap to check,
+  // and the failure it guards against is paying the wrong side.
+  const flaggedWinner = players.findIndex(p => p.won === true)
+  const conflicted =
+    outcome === 'decided' &&
+    winnerSide !== null &&
+    flaggedWinner !== -1 &&
+    flaggedWinner !== winnerSide
+
+  const status: ResolutionStatus =
+    conflicted ? 'provisional'
+    : voided    ? 'void'
+    : isFinal   ? 'official'
+    :             'provisional'
+
+  const official = !conflicted && (voided || isFinal)
+
+  const competitors: Competitor[] = players.map((p, idx) =>
+    afSide(p, idx, {
+      resolved,
+      draw,
+      won: draw ? false : winnerSide !== null ? idx === winnerSide : p.won === true,
+      method,
+      desyncSide,
+    })
+  )
+
+  // A draw has no winner, and neither does a void. Reporting one because a side
+  // sorted first is the quiet error that settles a market wrongly.
+  const winner = resolved && !draw && winnerSide !== null
+    ? competitors[winnerSide] ?? null
+    : null
+
+  const notes: string[] = []
+
+  if (conflicted) {
+    notes.push(
+      `CONFLICT: resolution.winner_side is ${winnerSide} but players[${flaggedWinner}].won is true. `
+      + `The upstream disagrees with itself about who won, so this is held at provisional and is `
+      + `NOT settleable regardless of resolution.settlement being "${settlement}".`
+    )
+  }
+
+  if (!isFinal && settlement !== 'void') {
+    notes.push(
+      `resolution.settlement is "${settlement ?? 'absent'}", not "final" — the match has not been `
+      + `re-simulated to a settled state. NOT settleable.`
+    )
+  }
+
+  if (voided) {
+    notes.push(`No contest (method ${method}) — nothing was decided. Refund rather than pay out.`)
+  }
+
+  if (draw) notes.push('Draw — no winner.')
+
+  // The single most important caveat this source carries. `verified: false`
+  // means the win was awarded because a side vanished, not because the ledger
+  // was replayed — the determinism guarantee does not cover this row.
+  if (r.verified === false) {
+    notes.push(
+      'NOT VERIFIED: this result was awarded without re-simulating the input ledger — a side '
+      + 'vanished and the win was granted by default. The outcome stands, but the deterministic '
+      + 'guarantee that makes this source authoritative does not apply to it.'
+    )
+  }
+
+  if (desyncSide !== null) {
+    notes.push(
+      `Anti-cheat conviction: side ${desyncSide} (${afLabel(players[desyncSide], desyncSide)}) had `
+      + `reported state hashes diverge from the server re-simulation. This is the anti-cheat firing, `
+      + `not a normal loss.`
+    )
+  }
+
+  if (AF_FORFEIT.test(method)) {
+    notes.push(
+      `Decided by ${method}. Agent Fighter treats leaving a wager as losing it, so this is reported `
+      + `as a decided win, not a void. Many books void forfeits under their own rules — that is a `
+      + `market-layer decision and this API deliberately does not make it for you.`
+    )
+  }
+
+  // The platform runs far more practice than wagers. A market priced on arcade
+  // material is priced on noise, and the mode is not otherwise visible in the
+  // normalised shape.
+  if (m.rated === false || (m.mode && m.mode !== 'wager')) {
+    notes.push(
+      `Not a rated wager (mode "${m.mode ?? 'unknown'}", rated ${m.rated ?? 'unknown'}). `
+      + `Exhibition or practice material — confirm this is a population you intend to price before `
+      + `building a market on it.`
+    )
+  }
+
+  if (players.some(p => p.is_agent)) {
+    const who = players
+      .map((p, i) => (p.is_agent ? `side ${i} (${afLabel(p, i)})` : null))
+      .filter(Boolean)
+      .join(', ')
+    notes.push(`AI agent participant — ${who}. Humans and agents share one arena here.`)
+  }
+
+  // Provenance for a settlement dispute. The state hash is reproducible: replay
+  // the same inputs on the same engine build and it must match. This is what
+  // `settled_seq` is for TxLINE — a handle to check the result against, not a
+  // claim to be trusted.
+  if (official && m.verification?.state_hash) {
+    notes.push(
+      `Verifiable: engine ${m.verification.engine ?? 'unknown'}, state_hash `
+      + `${m.verification.state_hash}. Results are only comparable within one engine build.`
+    )
+  }
+
+  return {
+    event_id:     m.id,
+    sport,
+    name:         afName(m),
+    season:       m.season != null ? String(m.season) : '',
+    // Mode is the competition class here (wager / arcade / solo / friendly),
+    // which is the closest analogue to the competition name soccer puts in this
+    // field. It is also what tells a consumer whether the match was for stakes.
+    round:        m.mode ?? null,
+
+    status,
+    // The only timestamp the feed carries. Every row is already played, so this
+    // is both the start time and the time of record.
+    scheduled_at: m.played_at ?? null,
+
+    competitors,
+    winner_id:    winner?.competitor_id ?? null,
+    winner:       winner?.name ?? null,
+
+    official,
+    void_reason:  voided ? 'no_contest' : null,
+
+    source:        'agentfighter',
+    authoritative: true,
+    observed_at:   observedAt,
+    // Documented as immutable once written, so the moment of record is the
+    // moment it was played.
+    finalized_at:  official ? m.played_at ?? observedAt : null,
+    notes,
+  }
+}
+
+/** Event registry from a projected `/matches` page. */
+export function eventsFromAgentFighter(sport: string, payload: unknown): EventRef[] {
+  return agentFighterMatches(payload)
+    .filter(m => m.id)
+    .map(m => ({
+      event_id:     m.id!,
+      sport,
+      name:         afName(m),
+      season:       m.season != null ? String(m.season) : '',
+      round:        m.mode ?? null,
+      scheduled_at: m.played_at ?? null,
+      source:       'agentfighter' as ProviderId,
+    }))
 }
 
 // ─── OpenF1 (provisional) ────────────────────────────────────────────────────

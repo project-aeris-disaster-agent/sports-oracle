@@ -56,6 +56,22 @@ export function qualifierFor(sport: string, path: string, a: QualifierArgs): str
     }
   }
 
+  // Agent Fighter is entirely un-season-scoped from a caching point of view. Its
+  // seasons are 21-day cycles numbered from 1, so a calendar-year qualifier
+  // would be meaningless, and every document it serves has exactly one current
+  // version — the recent-match feed, the current ladder, the current roster.
+  // Literals give each one a single stable entry instead of minting a dead one
+  // per year.
+  if (sport === 'agentfighter') {
+    switch (path) {
+      case 'schedule': case 'events':  return 'recent'
+      case 'resolve':                  return a.game_id ?? 'missing'
+      case 'standings':                return 'season'
+      case 'leaders':                  return 'elo'
+      default:                          return a.season ?? ''
+    }
+  }
+
   switch (path) {
     case 'schedule':
       return DATE_SCOPED.includes(sport) ? (a.date ?? '') : (a.season ?? '')

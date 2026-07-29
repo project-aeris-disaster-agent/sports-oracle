@@ -17,13 +17,14 @@ import { txline }     from './txline'
 import { opendota }   from './opendota'
 import { liquipedia } from './liquipedia'
 import { riot }       from './riot'
+import { agentfighter } from './agentfighter'
 
 export * from './types'
 export { SPORT_ENTITLED }
 
 export const PROVIDERS: Record<ProviderId, Provider> = {
   sportradar, jolpica, openf1, openligadb, sackmann, mlbstats, nhlweb, txline,
-  opendota, liquipedia, riot,
+  opendota, liquipedia, riot, agentfighter,
 }
 
 interface Route {
@@ -74,12 +75,17 @@ export const ROUTING: Record<string, Route> = {
   football: { default: openligadb },
 
   // ─── Esports ────────────────────────────────────────────────────────────────
-  // Dota 2 is the only title with an open, redistributable, match-level feed.
-  // Every other title routes to a provider that is registered and OFFLINE, which
-  // is deliberate: the router publishes what it could reach and why it does not,
-  // so an integrator gets a 503 naming the actual blocker instead of a 404 that
-  // reads like an oversight. See capabilities.ts for the per-title tags.
+  // Two titles serve. Every other one routes to a provider that is registered
+  // and OFFLINE, which is deliberate: the router publishes what it could reach
+  // and why it does not, so an integrator gets a 503 naming the actual blocker
+  // instead of a 404 that reads like an oversight. See capabilities.ts for the
+  // per-title tags.
   dota2: { default: opendota, alternates: [liquipedia] },
+
+  // The only title here whose operator publishes its own results API. That makes
+  // it the sole source by construction — there is no second party with standing
+  // to corroborate a match Agent Fighter itself simulated, so no alternates.
+  agentfighter: { default: agentfighter },
 
   // Publisher-locked. Riot does not license redistribution; no open fallback.
   lol:      { default: riot, alternates: [liquipedia] },

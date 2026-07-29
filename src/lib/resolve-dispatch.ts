@@ -14,6 +14,7 @@ import {
   fromJolpica,  eventsFromJolpica,
   fromTxLine,   eventsFromTxLine,
   fromOpenDota, eventsFromOpenDota, findDotaMatch,
+  fromAgentFighter, eventsFromAgentFighter, findAgentFighterMatch, agentFighterMatches,
   type Resolution, type EventRef,
 } from '@/lib/resolution'
 
@@ -203,7 +204,91 @@ const dota2: SportResolver = {
   },
 }
 
-export const RESOLVERS: Record<string, SportResolver> = { f1, soccer, dota2 }
+// ─── Agent Fighter ───────────────────────────────────────────────────────────
+
+// Read from the manifest for the same reason dota2 does — /api/internal/warm
+// writes with the manifest TTL, so a local copy that disagreed would leave the
+// warm job pinning the rolling feed while this module assumed a shorter life.
+const afFeedTtl    = () => ttlFor('agentfighter', 'events',  300)
+const afPendingTtl = () => ttlFor('agentfighter', 'resolve', 300)
+
+/**
+ * Match ids are opaque strings, e.g. `mms59mpyic0a5-6` — a session id and a
+ * match ordinal.
+ *
+ * Explicitly NOT the `/^\d+$/` guard the F1, soccer and Dota 2 resolvers use.
+ * Copying that pattern here would reject every valid id and make /resolve
+ * permanently 400. The bound exists so a malformed id fails fast with the
+ * format hint rather than becoming an upstream 404.
+ */
+const AF_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/
+
+const agentfighter: SportResolver = {
+  idFormat: 'an Agent Fighter match id, e.g. mms59mpyic0a5-6',
+
+  async events(sport, q) {
+    const { data, fromCache } = await getOrFetch({
+      sport, dataType: 'schedule',
+      // Not season-scoped: this is a rolling window of recently settled matches.
+      // qualifierFor returns the same literal so the warm job writes the key the
+      // resolver reads.
+      qualifier: qualifierFor(sport, 'events', {}),
+      ttl: afFeedTtl(), params: {},
+    })
+
+    const events = eventsFromAgentFighter(sport, data)
+    // Agent Fighter seasons are 21-day cycles numbered from 1, so neither the
+    // calendar year nor a manifest constant is the real answer. Take it from the
+    // newest row in the feed and fall back only if the feed is empty.
+    const season = q.season ?? events[0]?.season ?? currentSeason(sport)
+    return { events, fromCache, season }
+  },
+
+  async resolve(sport, eventId) {
+    const matchId = eventId.trim()
+    if (!AF_ID.test(matchId)) {
+      return { resolution: null, fromCache: false, cacheKey: '', dataType: '' }
+    }
+
+    // 1. The registry feed first — one cached document, usually a hit.
+    try {
+      const feed = await getOrFetch({
+        sport, dataType: 'schedule', qualifier: qualifierFor(sport, 'events', {}),
+        ttl: afFeedTtl(), params: {},
+      })
+      const hit = findAgentFighterMatch(feed.data, matchId)
+      if (hit) {
+        // cacheKey deliberately empty: /resolve promotes the key it is handed to
+        // a 30-day TTL once official, and this key is the ROLLING FEED. Pinning
+        // it would freeze the registry at today's matches. The per-match path
+        // below promotes its own entry safely.
+        return {
+          resolution: fromAgentFighter(sport, hit),
+          fromCache:  feed.fromCache,
+          cacheKey:   '',
+          dataType:   'schedule',
+        }
+      }
+    } catch {
+      // A feed outage must not block a per-match lookup that would succeed.
+    }
+
+    // 2. Not in the registry — fetch the match directly.
+    //
+    // This is also the path for every unrated match: the feed is filtered to
+    // rated wagers (see providers/agentfighter.ts), so arcade, solo and friendly
+    // matches are resolvable but never listed by /events.
+    const { data, cacheKey, fromCache } = await getOrFetch({
+      sport, dataType: 'results', qualifier: matchId,
+      ttl: afPendingTtl(), params: { match_id: matchId },
+    })
+
+    const match = findAgentFighterMatch(data, matchId) ?? agentFighterMatches(data)[0] ?? null
+    return { resolution: fromAgentFighter(sport, match), fromCache, cacheKey, dataType: 'results' }
+  },
+}
+
+export const RESOLVERS: Record<string, SportResolver> = { f1, soccer, dota2, agentfighter }
 
 export function resolverFor(sport: string): SportResolver | undefined {
   return RESOLVERS[sport]

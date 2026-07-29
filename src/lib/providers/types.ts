@@ -19,6 +19,7 @@ export type ProviderId =
   | 'opendota'
   | 'liquipedia'
   | 'riot'
+  | 'agentfighter'
 
 /**
  * Commercial-redistribution posture. This is enforced, not decorative:

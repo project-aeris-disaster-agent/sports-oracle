@@ -342,8 +342,13 @@ const DECLARED: SportDecl[] = [
 
   // ─── Esports ────────────────────────────────────────────────────────────────
   //
-  // Every title below is registered. Exactly one of them serves data, and that
-  // ratio is the honest state of open-source esports rather than a build gap.
+  // Every title below is registered. Two of them serve data, and that ratio is
+  // the honest state of open-source esports rather than a build gap.
+  //
+  // Note WHICH two, because it is the whole argument: Dota 2, where the publisher
+  // happens to expose a WebAPI, and Agent Fighter, whose operator publishes a
+  // results API deliberately. Coverage tracks publisher willingness exactly, and
+  // nothing else.
   //
   // The constraint is licensing, not engineering. Match-level esports results are
   // published by the game publishers, and none of them permit redistribution:
@@ -395,6 +400,54 @@ const DECLARED: SportDecl[] = [
       { path: 'live', dataType: 'live', params: [], ttl: 60, minTier: 'analyst',
         desc: 'In-progress professional matches',
         signal: 'In-play pricing only — a live match has no winner and is never settleable.' },
+    ],
+  },
+
+  {
+    key: 'agentfighter', label: 'Agent Fighter', entitled: true, status: 'online', group: 'esports',
+    statusNote: 'Open results API · winners derived by deterministic re-simulation',
+    capacity: 'high', teamBased: false, season: '2026',
+    // 'online', and unlike dota2 that is not a hedge: every endpoint below was
+    // probed live and returned 200 with the documented shape. The upstream also
+    // publishes an OpenAPI 3.1 spec, so the field names are contractual rather
+    // than observed.
+    note: 'A deterministic browser fighting game where humans and AI agents share one arena, '
+        + 'and the only esports title here whose operator publishes its own results API. '
+        + 'The winner of a ranked match is DERIVED, not reported: the server re-simulates the '
+        + "match's full input ledger from tick 0 on a fixed-point engine, and publishes the final "
+        + 'state hash so a counterparty can replay the inputs and check the result independently. '
+        + 'Settlement is gated on `resolution.settlement` alone — final settles, void refunds, '
+        + 'provisional never settles. There is no confirmation window because the upstream states '
+        + 'the settled/unsettled distinction directly rather than leaving it to be inferred. '
+        + 'THREE THINGS TO ENCODE: (1) a forfeit is reported as a DECIDED WIN, because leaving a '
+        + 'wager loses it by design here — void it under your own rules if you want to, this API '
+        + 'will not do it for you; (2) `verified: false` means the win was awarded because a side '
+        + 'vanished rather than by replaying the ledger, so the determinism guarantee does not '
+        + 'cover that row; (3) /events lists RATED WAGERS ONLY — the platform runs far more arcade '
+        + 'practice than wagers, so an unfiltered registry would be almost all material no market '
+        + 'would price. /resolve still resolves any match id, rated or not. '
+        + 'Seasons are 21-day cycles numbered from 1; `season` on each event carries the real one.',
+    endpoints: [
+      // Overridden from the shared specs for the same reason dota2 overrides
+      // them: these are rolling feeds, not season documents fixed months ahead.
+      // The shared 1-day EVENTS ttl would leave a match that settled minutes ago
+      // invisible to /events for 24 hours. resolve-dispatch.ts reads both via
+      // ttlFor() rather than keeping its own copy, so they cannot drift.
+      { ...EVENTS,  ttl: 300,
+        desc: 'Recently settled rated wagers (id, players, time)',
+        signal: 'The registry a market binds to. NOTE: this feed is settled-only — Agent Fighter '
+              + 'publishes no forward schedule, so a market must be opened from outside this API '
+              + 'and bound to a match id after the fact.' },
+      { ...RESOLVE, ttl: 300 },
+      { path: 'standings', dataType: 'standings', params: [], ttl: 900,
+        desc: 'Season Elo ladder with computed ranks',
+        signal: 'Settles season-ladder and finishing-position markets. Rated players only, which '
+              + 'is the real ladder — legitimately empty early in a season, before anyone has '
+              + 'played a rated match. Use /leaders for a populated roster.' },
+      { path: 'leaders', dataType: 'leaders', params: [], ttl: 900,
+        desc: 'Ranked roster with records and lifetime + season Elo',
+        signal: 'Base rates for head-to-head pricing. Carries win rate, level and both Elo pools, '
+              + 'and flags whether each competitor is a human or an AI agent.' },
     ],
   },
 
