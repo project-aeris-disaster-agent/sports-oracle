@@ -3,6 +3,7 @@ import Image from 'next/image'
 import { SPORTS, ENTITLED_SPORTS, toolCatalog } from '@/lib/capabilities'
 import { SportsPanel } from '@/components/sports-panel'
 import { LoginButton, AccountNav } from '@/components/login-button'
+import { DareTokenPanel } from '@/components/dare-token'
 import { getLiveStatus, summarise } from '@/lib/status'
 import { TIERS, TIER_ORDER }        from '@/lib/tiers'
 
@@ -18,6 +19,15 @@ const TIER_ROWS = TIER_ORDER.map(t => TIERS[t])
 // Derived from the capability manifest, not hand-listed. The previous hardcoded
 // array had drifted from the tools the MCP route actually served.
 const TOOLS: [string, string][] = toolCatalog().map(t => [t.name, t.spec.desc])
+
+// Base URL shown in the copy-paste docs. The old hardcoded `sports-oracle.vercel.app`
+// is NOT this deployment — it serves an unrelated app, so anyone pasting the
+// quickstart hit the wrong host. Prefer the configured public URL; fall back to
+// the real production alias, never to localhost or the wrong domain.
+const envUrl = process.env.NEXT_PUBLIC_APP_URL
+const PROD_URL = envUrl && envUrl.startsWith('https://') && !envUrl.includes('localhost')
+  ? envUrl.replace(/\/$/, '')
+  : 'https://sports-oracle-agent-aeris-projects.vercel.app'
 
 function Section({
   id, legend, title, kicker, children,
@@ -68,6 +78,7 @@ export default async function Home() {
             <a href="#sports" className="hover:text-white transition-colors">Sports</a>
             <a href="#agents" className="hover:text-white transition-colors">For agents</a>
             <a href="#access" className="hover:text-white transition-colors">Access</a>
+            <a href="#token" className="hover:text-white transition-colors">$DARE</a>
           </nav>
           <span className="flex-1" />
           <AccountNav />
@@ -124,7 +135,7 @@ export default async function Home() {
           </div>
 
           <Code>{`curl -H "X-Oracle-Key: sk_live_..." \\
-  "https://sports-oracle.vercel.app/api/v1/nba/injuries"`}</Code>
+  "${PROD_URL}/api/v1/nba/injuries"`}</Code>
         </section>
 
         {/* ─── Sports panel (main event) ──────────────────────────────────── */}
@@ -160,7 +171,7 @@ export default async function Home() {
               <Code>{`{
   "mcpServers": {
     "sports-oracle": {
-      "url": "https://sports-oracle.vercel.app/api/mcp",
+      "url": "${PROD_URL}/api/mcp",
       "headers": { "X-Oracle-Key": "sk_live_..." }
     }
   }
@@ -277,6 +288,16 @@ X-Oracle-Key: sk_live_...
               </div>
             ))}
           </div>
+        </Section>
+
+        {/* ─── $DARE token ────────────────────────────────────────────────── */}
+        <Section
+          id="token"
+          legend="TOKEN"
+          title="$DARE on Base"
+          kicker="Access is staked in $DARE. New here? Acquire it in a few steps, then stake on the dashboard to mint a key."
+        >
+          <DareTokenPanel />
         </Section>
 
         {/* ─── MCP tools ──────────────────────────────────────────────────── */}

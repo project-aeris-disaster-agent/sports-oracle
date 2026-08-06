@@ -8,6 +8,13 @@ import { SPORTS } from '@/lib/capabilities'
 import { TIERS } from '@/lib/tiers'
 import { StakePanel } from '@/components/stake-panel'
 
+// See page.tsx: the old hardcoded `sports-oracle.vercel.app` serves an unrelated
+// app. Prefer the configured public URL, fall back to the real production alias.
+const _envUrl = process.env.NEXT_PUBLIC_APP_URL
+const PROD_URL = _envUrl && _envUrl.startsWith('https://') && !_envUrl.includes('localhost')
+  ? _envUrl.replace(/\/$/, '')
+  : 'https://sports-oracle-agent-aeris-projects.vercel.app'
+
 // Derived from lib/tiers.ts so the console can't display a threshold the gateway
 // doesn't enforce.
 const TIER_META: Record<string, { label: string; next?: string; nextStake?: string; color: string }> = {
@@ -482,7 +489,7 @@ function DashboardInner() {
         {/* ── Quick start ───────────────────────────────────────────────── */}
         <Panel legend="NEXT" title="Use your key">
           <pre className="code p-4 text-[color:var(--text-dim)]">{`curl -H "X-Oracle-Key: sk_live_..." \\
-  "https://sports-oracle.vercel.app/api/v1/nba/injuries"`}</pre>
+  "${PROD_URL}/api/v1/nba/injuries"`}</pre>
           <Link href="/#sports" className="btn-ghost inline-block rounded-md px-4 py-2 text-[12px]">
             Browse all endpoints
           </Link>
