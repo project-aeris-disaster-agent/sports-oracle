@@ -10,10 +10,10 @@
 name: Cache warm-up
 
 on:
-  schedule:
-    - cron: '0 6 * * 1'      # Weekly Monday 06:00 UTC — cold data
-    - cron: '0 */6 * * *'    # Every 6 hours — warm data + cleanup
-    - cron: '0 12-23 * * *'  # Pre-game window (US game times)
+  # Scheduling moved to Supabase pg_cron (job "cache-warm", hourly) + a pure-SQL
+  # cleanup job. This ran on GitHub-hosted runners, and the aggressive matrix
+  # exhausted the 2,000-min/month free allowance in ~5 days, after which every
+  # run failed with "job was not acquired by Runner". Kept as a manual fallback.
   workflow_dispatch:
     inputs:
       sport:

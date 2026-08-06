@@ -18,8 +18,9 @@
 name: Esports cache warm-up
 
 on:
-  schedule:
-    - cron: '*/15 * * * *'
+  # Scheduling moved to Supabase pg_cron ("cache-warm" covers every entitled
+  # sport, esports included). The every-15-min schedule here was a major
+  # contributor to exhausting the free GitHub Actions minutes. Manual fallback only.
   workflow_dispatch:
     inputs:
       force:

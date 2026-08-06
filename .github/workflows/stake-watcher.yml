@@ -9,8 +9,10 @@
 name: Stake watcher
 
 on:
-  schedule:
-    - cron: '*/10 * * * *'   # every 10 minutes
+  # Scheduling moved to Supabase pg_cron (job "stake-watcher", every 30 min,
+  # pg_net POST to /api/internal/refresh-stakes). The every-10-min schedule here
+  # burned free Actions minutes and stopped running once they were exhausted —
+  # leaving stake enforcement silently frozen. Manual fallback only.
   workflow_dispatch:
 
 jobs:
