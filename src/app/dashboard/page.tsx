@@ -13,7 +13,7 @@ import { StakePanel } from '@/components/stake-panel'
 const _envUrl = process.env.NEXT_PUBLIC_APP_URL
 const PROD_URL = _envUrl && _envUrl.startsWith('https://') && !_envUrl.includes('localhost')
   ? _envUrl.replace(/\/$/, '')
-  : 'https://sports-oracle-agent-aeris-projects.vercel.app'
+  : 'https://router.sonara.bio'
 
 // Derived from lib/tiers.ts so the console can't display a threshold the gateway
 // doesn't enforce.

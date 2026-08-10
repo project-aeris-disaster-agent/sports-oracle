@@ -21,6 +21,7 @@ import { qualifierFor }              from '@/lib/cache-key'
 import {
   ENTITLED_SPORTS, getSport, getEndpoint, supportedFor, endpointSource, toolCatalog,
 } from '@/lib/capabilities'
+import { resolverFor, resolveEvent, RESOLVERS } from '@/lib/resolve-dispatch'
 
 // ─── Tool definitions, derived ────────────────────────────────────────────────
 
@@ -87,33 +88,167 @@ function fail(message: string, status = 400, extra: object = {}): ToolOutcome {
   return { text: JSON.stringify({ error: message, ...extra }), cacheHit: false, status }
 }
 
+function ok(payload: object, cacheHit: boolean): ToolOutcome {
+  return { text: JSON.stringify(payload), cacheHit, status: 200 }
+}
+
+/**
+ * Provider provenance. `supports_settlement` is a CAPABILITY of the source — "is
+ * this an authority we would settle from" — and is constant per provider.
+ *
+ * It was previously called `settleable`, which read as a per-event verdict and
+ * was consumed as one: it returned true for a race that had not been run, so a
+ * market gating on it would have settled an unresolved event. The per-event
+ * answer is `meta.settleable`, computed from the resolved outcome, and it exists
+ * only on /resolve — because it is the only place the question has an answer.
+ */
+function sourceOf(sport: string, path: string) {
+  const src = endpointSource(sport, path)
+  return src && {
+    provider: src.id,
+    label:    src.label,
+    license:  src.license,
+    supports_settlement: src.authoritative,
+  }
+}
+
+/**
+ * The resolution surface, delegated to the shared dispatcher.
+ *
+ * Everything here used to be served by the generic path below, which fetched
+ * `endpoint.dataType` straight from the provider. That produced four separate
+ * defects at once: a single F1-shaped id parser rejected soccer/dota2/agentfighter
+ * ids, `get_events` returned raw upstream bodies despite advertising a normalised
+ * registry, `get_resolve` demanded a `match_id` the public schema had no way to
+ * supply, and settleability came from a static provider flag. Delegating fixes all
+ * four at the source rather than papering over each symptom.
+ */
+async function handleResolution(
+  path: 'events' | 'resolve',
+  sport: string,
+  args: Record<string, string>
+): Promise<ToolOutcome> {
+  const resolver = resolverFor(sport)
+  if (!resolver) {
+    return fail('Resolution is not available for this sport.', 404, {
+      code: 'resolution_unsupported',
+      supported: Object.keys(RESOLVERS),
+    })
+  }
+
+  if (path === 'events') {
+    const { events: all, fromCache, season } = await resolver.events(sport, {
+      season: args.season, from: args.from, to: args.to,
+    })
+
+    // Same window filter the REST route applies, so both transports return the
+    // same set for the same arguments.
+    let events = all
+    if (args.from) events = events.filter(e => !e.scheduled_at || e.scheduled_at >= args.from)
+    if (args.to)   events = events.filter(e => !e.scheduled_at || e.scheduled_at <= args.to)
+
+    return ok({
+      sport, season, count: events.length, events,
+      meta: { source: fromCache ? 'cache' : 'origin', ...sourceOf(sport, 'events') },
+    }, fromCache)
+  }
+
+  const eventId = args.event_id
+  if (!eventId) {
+    return fail('event_id is required. Get one from get_events.', 400, { code: 'missing_param' })
+  }
+
+  const outcome = await resolveEvent(sport, eventId)
+
+  if (!outcome.ok) {
+    if (outcome.reason === 'unsupported') {
+      return fail('Resolution is not available for this sport.', 404,
+        { code: 'resolution_unsupported', supported: outcome.supported })
+    }
+    if (outcome.reason === 'malformed') {
+      return fail('Malformed event_id.', 400,
+        { code: 'malformed_event_id', event_id: eventId, expected: outcome.idFormat })
+    }
+    // Valid id, no outcome yet — a future event, or one this source has never
+    // heard of. Carries meta.settleable so a market gating on that field gets an
+    // explicit false here rather than an absent key it has to interpret.
+    return fail('No result available for this event yet.', 404, {
+      code: 'event_not_found',
+      event_id: eventId,
+      meta: { settleable: false, status: 'unknown' },
+    })
+  }
+
+  const { resolution, fromCache } = outcome
+
+  return ok({
+    sport,
+    event_id: eventId,
+    resolution,
+    // Per-event, computed from the outcome — NOT a provider capability. An event
+    // that has not happened, or has no official classification yet, is false here.
+    meta: {
+      source:     fromCache ? 'cache' : 'origin',
+      settleable: resolution.official,
+      status:     resolution.status,
+      note: resolution.official
+        ? (resolution.void_reason
+            ? `Void (${resolution.void_reason}) — no result. Safe to settle as void.`
+            : 'Official result. Safe to settle.')
+        : `NOT settleable — status is "${resolution.status}".`,
+      ...sourceOf(sport, 'resolve'),
+    },
+  }, fromCache)
+}
+
 async function handleTool(
   tool: Tool,
   args: Record<string, string>,
   tier: keyof typeof TIER_RANK
 ): Promise<ToolOutcome> {
   const sport = args.sport?.toLowerCase()
-  if (!sport) return fail('sport is required.')
+  if (!sport) return fail('sport is required.', 400, { code: 'missing_param' })
 
+  // Resolve against the manifest FIRST, and only ever echo values that came back
+  // from it. Reflecting the caller's raw `sport` into the message put attacker-
+  // controlled text in an error string; every identifier below is now ours.
   const spec = getSport(sport)
-  if (!spec || !spec.entitled) {
-    return fail(`${sport.toUpperCase()} is not available.`, 404,
-      { supported: ENTITLED_SPORTS.map(s => s.key) })
+  if (!spec) {
+    return fail('Unknown sport.', 404,
+      { code: 'unknown_sport', supported: ENTITLED_SPORTS.map(s => s.key) })
+  }
+  if (!spec.entitled) {
+    return fail(`${spec.label} is not available on this plan.`, 404,
+      { code: 'sport_unavailable', sport: spec.key, supported: ENTITLED_SPORTS.map(s => s.key) })
   }
 
   const endpoint = getEndpoint(sport, tool.path)
   if (!endpoint) {
-    return fail(`${tool.name} is not available for ${sport.toUpperCase()}.`, 404,
-      { supported: supportedFor(tool.path) })
+    return fail(`${tool.name} is not available for ${spec.label}.`, 404,
+      { code: 'endpoint_unavailable', sport: spec.key, supported: supportedFor(tool.path) })
   }
 
-  // Tier gate, mirroring the REST preflight checks.
+  // Tier gate, mirroring the REST preflight checks. Names the TOOL, not the
+  // endpoint description — interpolating the description made get_verify's
+  // denial read as a dump of its own docs rather than an access decision.
   const need = endpoint.minTier ?? 'scout'
   if (TIER_RANK[tier] < TIER_RANK[need]) {
-    return fail(`${endpoint.desc} requires ${need} tier or above.`, 403)
+    return fail(`${tool.name} requires ${need} tier or above.`, 403,
+      { code: 'tier_required', required: need, tier })
+  }
+
+  // The resolution surface is normalised and per-sport; it must not be served by
+  // the generic pass-through below. See handleResolution.
+  if (tool.path === 'events' || tool.path === 'resolve') {
+    return handleResolution(tool.path, sport, args)
   }
 
   const date = args.date ?? new Date().toISOString().split('T')[0]
+
+  // Documented as "Defaults to 1", and the REST route applies that default — but
+  // this transport did not, so the upstream path template hit an unfilled {week}
+  // and failed on a parameter the schema advertises as optional.
+  const week = args.week ?? '1'
 
   // event_id is the resolution surface's addressing scheme; unpack it into the
   // season/round the upstream actually wants.
@@ -131,8 +266,7 @@ async function handleTool(
   }
 
   const keyArgs = {
-    season, date, round,
-    week:        args.week,
+    season, date, round, week,
     game_id:     args.game_id,
     team_id:     args.team_id,
     race_id:     args.race_id,
@@ -155,23 +289,12 @@ async function handleTool(
       dataType:  endpoint.dataType,
       qualifier,
       ttl:       endpoint.ttl,
-      params:    { ...dateParams(date), season, round: round ?? '', ...args },
+      params:    { ...dateParams(date), season, round: round ?? '', week, ...args },
     })
 
-    const src = endpointSource(sport, tool.path)
-    return {
-      // Provenance travels with MCP responses too — an agent reasoning about
-      // whether it may settle on this data needs the same facts a REST caller gets.
-      text: JSON.stringify({
-        data,
-        _source: src && {
-          provider: src.id, label: src.label, license: src.license,
-          settleable: src.authoritative,
-        },
-      }),
-      cacheHit: fromCache,
-      status:   200,
-    }
+    // Provenance travels with MCP responses too — an agent reasoning about
+    // whether it may settle on this data needs the same facts a REST caller gets.
+    return ok({ data, _source: sourceOf(sport, tool.path) }, fromCache)
   } catch (err) {
     const msg    = err instanceof Error ? err.message : 'Tool error'
     const status = (err as { status?: number }).status ?? 502
@@ -229,12 +352,20 @@ export async function POST(req: NextRequest) {
       })
     }
 
+    // Entitlement check. Only ever names a sport the manifest recognises — the
+    // caller's raw value is never echoed, so a hostile `sport` cannot ride out in
+    // an error string a client might render.
     const sport = toolArgs.sport?.toLowerCase()
-    if (sport && !context.sportMask.includes(sport)) {
+    const known = sport ? getSport(sport) : undefined
+    if (sport && (!known || !context.sportMask.includes(known.key))) {
       return NextResponse.json({
-        content: [{ type: 'text', text: JSON.stringify({
-          error: `Your key does not include ${sport.toUpperCase()} access.`,
-        })}],
+        content: [{ type: 'text', text: JSON.stringify(
+          known
+            ? { error: `Your key does not include ${known.label} access.`,
+                code: 'sport_not_entitled', sport: known.key }
+            : { error: 'Unknown sport.', code: 'unknown_sport',
+                supported: ENTITLED_SPORTS.map(s => s.key) }
+        )}],
       })
     }
 

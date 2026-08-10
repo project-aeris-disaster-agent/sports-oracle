@@ -197,7 +197,7 @@ const EVENTS: EndpointSpec = {
 const RESOLVE: EndpointSpec = {
   path: 'resolve', dataType: 'results', params: ['event_id'], ttl: 300,
   desc: 'Normalised outcome with an explicit official/provisional flag',
-  signal: 'Settlement source. Only settle when meta.settleable is true.',
+  signal: 'Settlement source. Only settle when meta.settleable is true — it is computed per event, so an unfinished or unknown event returns false.',
 }
 
 type SportDecl = Omit<SportSpec, 'sources'>

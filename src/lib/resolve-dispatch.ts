@@ -6,10 +6,11 @@
 // normalise it. Adding a resolvable sport is a mapper plus one entry here — no
 // route edits, which is the same plug-and-play rule the provider registry follows.
 
-import { getOrFetch }    from '@/lib/serve'
-import { currentSeason } from '@/lib/upstream'
-import { qualifierFor }  from '@/lib/cache-key'
-import { ttlFor }        from '@/lib/capabilities'
+import { getOrFetch }        from '@/lib/serve'
+import { currentSeason, recacheWithTtl } from '@/lib/upstream'
+import { qualifierFor }      from '@/lib/cache-key'
+import { ttlFor }            from '@/lib/capabilities'
+import { resolveProvider }   from '@/lib/providers'
 import {
   fromJolpica,  eventsFromJolpica,
   fromTxLine,   eventsFromTxLine,
@@ -23,7 +24,20 @@ export interface EventQuery { season?: string; from?: string; to?: string }
 interface SportResolver {
   /** Fetches and normalises the event registry. */
   events: (sport: string, q: EventQuery) => Promise<{ events: EventRef[]; fromCache: boolean; season: string }>
-  /** Fetches and normalises one event's outcome. */
+  /**
+   * Fetches and normalises one event's outcome.
+   *
+   * A null `resolution` means "no outcome produced", and the two reasons for that
+   * are NOT interchangeable — callers must be able to tell a bad id from an event
+   * that simply has no result yet. The distinguishing signal is `dataType`:
+   *
+   *   dataType === ''  the id failed this sport's format check; nothing was
+   *                    fetched. The caller's id is wrong.
+   *   dataType !== ''  the upstream was queried and returned no usable outcome —
+   *                    a future race, an unplayed fixture, an unknown match id.
+   *                    The id may be perfectly valid; there is just nothing to
+   *                    settle. Never report this as malformed.
+   */
   resolve: (sport: string, eventId: string) => Promise<{ resolution: Resolution | null; fromCache: boolean; cacheKey: string; dataType: string; data?: unknown }>
   /** Human hint shown when an event_id doesn't parse. */
   idFormat: string
@@ -292,4 +306,54 @@ export const RESOLVERS: Record<string, SportResolver> = { f1, soccer, dota2, age
 
 export function resolverFor(sport: string): SportResolver | undefined {
   return RESOLVERS[sport]
+}
+
+/** An official result is immutable, so it never needs fetching twice. */
+const TTL_OFFICIAL = 2592000  // 30 days
+
+export type ResolveOutcome =
+  | { ok: false; reason: 'unsupported'; supported: string[] }
+  | { ok: false; reason: 'malformed';   idFormat: string }
+  | { ok: false; reason: 'not_found' }
+  | { ok: true;  resolution: Resolution; fromCache: boolean }
+
+/**
+ * Resolve one event, end to end: per-sport id validation, normalisation, and the
+ * cache-lifetime promotion that follows a result becoming official.
+ *
+ * Every transport must go through here. The MCP route previously re-implemented
+ * this by fetching `endpoint.dataType` directly, which silently reintroduced the
+ * exact class of bug this module exists to prevent: a single F1-shaped id parser
+ * applied to every sport, no normalisation, and a `settleable` flag copied from a
+ * static provider capability instead of the resolved outcome — so a race that had
+ * not happened yet still reported as settleable. One implementation, two
+ * transports; adding a third must not mean writing this a third time.
+ */
+export async function resolveEvent(sport: string, eventId: string): Promise<ResolveOutcome> {
+  const resolver = resolverFor(sport)
+  if (!resolver) return { ok: false, reason: 'unsupported', supported: Object.keys(RESOLVERS) }
+
+  const { resolution, cacheKey, fromCache, dataType, data } = await resolver.resolve(sport, eventId)
+
+  if (!resolution) {
+    // An id that never reached the upstream is malformed; one that did and came
+    // back empty is simply not settleable yet. Reporting a future race as
+    // "malformed" sent integrators hunting for a bug in their own id handling.
+    return dataType
+      ? { ok: false, reason: 'not_found' }
+      : { ok: false, reason: 'malformed', idFormat: resolver.idFormat }
+  }
+
+  // Promote to the long TTL the first time we see an official result. Only on a
+  // fresh fetch — a cache hit is already holding the right lifetime. Resolvers
+  // that hand back an empty cacheKey (rolling feeds) opt out deliberately;
+  // pinning those would freeze the registry.
+  if (resolution.official && !fromCache && cacheKey) {
+    const provider = resolveProvider(sport, dataType)
+    if (provider && data && typeof data === 'object') {
+      recacheWithTtl(sport, dataType, cacheKey, data as Record<string, unknown>, TTL_OFFICIAL, provider.id)
+    }
+  }
+
+  return { ok: true, resolution, fromCache }
 }

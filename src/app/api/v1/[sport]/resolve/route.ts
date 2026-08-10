@@ -14,10 +14,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { gateway }                   from '@/middleware/gateway'
 import { logRequest }                from '@/lib/serve'
-import { recacheWithTtl }            from '@/lib/upstream'
-import { resolveProvider }           from '@/lib/providers'
 import { RESOLVABLE }                from '@/lib/resolution'
-import { resolverFor }               from '@/lib/resolve-dispatch'
+import { resolverFor, resolveEvent } from '@/lib/resolve-dispatch'
 
 const TTL_OFFICIAL = 2592000  // 30 days — immutable once official
 
@@ -49,29 +47,28 @@ export async function GET(
   }
 
   try {
-    const { resolution, cacheKey, fromCache, dataType, data } = await resolver.resolve(sport, eventId)
+    // Per-sport id validation, normalisation and the official-result TTL
+    // promotion all live in resolveEvent, so this transport and MCP cannot drift.
+    const outcome = await resolveEvent(sport, eventId)
 
-    if (!resolution) {
-      return NextResponse.json(
-        {
-          error: `Malformed event_id "${eventId}" for ${sport.toUpperCase()}.`,
-          expected: resolver.idFormat,
-        },
-        { status: 400 }
-      )
+    if (!outcome.ok) {
+      const body =
+        outcome.reason === 'unsupported'
+          ? { error: 'Market resolution is not yet available for this sport.', supported: outcome.supported }
+        : outcome.reason === 'malformed'
+          ? { error: 'Malformed event_id.', event_id: eventId, expected: outcome.idFormat }
+          // Valid id, nothing to settle yet. meta.settleable is explicit so the
+          // gate a market reads is present on this path too.
+          : { error: 'No result available for this event yet.', event_id: eventId,
+              meta: { settleable: false, status: 'unknown' } }
+
+      return NextResponse.json(body, {
+        status: outcome.reason === 'malformed' ? 400 : 404,
+        headers: { 'X-Settleable': 'false' },
+      })
     }
 
-    // Promote to the long TTL the first time we see an official result. Only on
-    // a fresh fetch — a cache hit already holds the right lifetime.
-    if (resolution.official && !fromCache && cacheKey) {
-      const provider = resolveProvider(sport, dataType)
-      // Re-cache the ACTUAL payload. An earlier revision wrote a placeholder
-      // here, which overwrote the real document with an empty one and pinned
-      // that for 30 days — the fixture then resolved as "no events published".
-      if (provider && data && typeof data === 'object') {
-        recacheWithTtl(sport, dataType, cacheKey, data as Record<string, unknown>, TTL_OFFICIAL, provider.id)
-      }
-    }
+    const { resolution, fromCache } = outcome
 
     logRequest(context, sport, 'resolve', fromCache, Date.now() - start)
 

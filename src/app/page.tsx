@@ -20,14 +20,15 @@ const TIER_ROWS = TIER_ORDER.map(t => TIERS[t])
 // array had drifted from the tools the MCP route actually served.
 const TOOLS: [string, string][] = toolCatalog().map(t => [t.name, t.spec.desc])
 
-// Base URL shown in the copy-paste docs. The old hardcoded `sports-oracle.vercel.app`
-// is NOT this deployment — it serves an unrelated app, so anyone pasting the
-// quickstart hit the wrong host. Prefer the configured public URL; fall back to
-// the real production alias, never to localhost or the wrong domain.
+// Base URL shown in the copy-paste docs. An earlier version hardcoded
+// `sports-oracle.vercel.app`, which is NOT this deployment — it serves an
+// unrelated app, so anyone pasting the quickstart hit the wrong host. Prefer the
+// configured public URL; fall back to the canonical customer-facing domain,
+// never to localhost, the wrong domain, or a deployment-hash URL.
 const envUrl = process.env.NEXT_PUBLIC_APP_URL
 const PROD_URL = envUrl && envUrl.startsWith('https://') && !envUrl.includes('localhost')
   ? envUrl.replace(/\/$/, '')
-  : 'https://sports-oracle-agent-aeris-projects.vercel.app'
+  : 'https://router.sonara.bio'
 
 function Section({
   id, legend, title, kicker, children,
