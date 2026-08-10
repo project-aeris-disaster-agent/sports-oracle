@@ -297,7 +297,12 @@ const DECLARED: SportDecl[] = [
         desc: 'Score event snapshots for a fixture', signal: 'Raw in-play event feed.' },
       { path: 'odds',     dataType: 'odds',     params: ['fixture_id'], ttl: 60, minTier: 'analyst',
         desc: 'Latest odds for a fixture', signal: 'Market consensus pricing.' },
-      { path: 'verify',   dataType: 'validation', params: ['fixture_id', 'seq', 'stat_keys?'], ttl: 86400, minTier: 'analyst',
+      // stat_keys is REQUIRED, not optional: the proof is scoped to the specific
+      // statistic being settled, and our upstream template interpolates it. It was
+      // advertised optional, so a caller omitting it got a confusing upstream
+      // param error. Defaulting it would be worse than erroring — a Merkle proof
+      // for a stat you are not settling on is a proof of the wrong thing.
+      { path: 'verify',   dataType: 'validation', params: ['fixture_id', 'seq', 'stat_keys'], ttl: 86400, minTier: 'analyst',
         desc: 'Merkle proof for one score update (pass the settled_seq from /resolve)',
         signal: 'Lets a counterparty verify a settlement independently, on-chain.' },
     ],
