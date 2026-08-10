@@ -14,6 +14,8 @@
 // entirely, and logged every call as a cache miss with 0ms latency.
 
 import { NextRequest, NextResponse } from 'next/server'
+import { Ratelimit }                 from '@upstash/ratelimit'
+import { Redis }                     from '@upstash/redis'
 import { gateway }                   from '@/middleware/gateway'
 import { getOrFetch, logRequest }    from '@/lib/serve'
 import { currentSeason, dateParams } from '@/lib/upstream'
@@ -79,6 +81,36 @@ const TOOLS = buildTools()
 const BY_NAME = new Map(TOOLS.map(t => [t.name, t]))
 
 const TIER_RANK = { scout: 0, analyst: 1, oracle: 2 } as const
+
+// ─── Discovery rate limit ─────────────────────────────────────────────────────
+// initialize/tools/list are unauthenticated, so they sit outside the gateway's
+// per-account limiter and need their own bound. Keyed by IP and deliberately
+// generous — a legitimate client handshakes once per session, while this still
+// denies anyone trying to use an open endpoint as a load generator. Both
+// responses are static, so this costs one Redis command and no upstream work.
+const discoveryLimiter = new Ratelimit({
+  redis:   new Redis({
+    url:   process.env.UPSTASH_REDIS_REST_URL!,
+    token: process.env.UPSTASH_REDIS_REST_TOKEN!,
+  }),
+  limiter: Ratelimit.slidingWindow(60, '1 m'),
+  prefix:  'rl:mcp:discovery',
+})
+
+/** Returns a 429 response when the caller has exhausted the discovery budget. */
+async function limitDiscovery(req: NextRequest): Promise<NextResponse | null> {
+  const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? 'unknown'
+  const { success, reset } = await discoveryLimiter.limit(ip)
+  if (success) return null
+
+  return NextResponse.json(
+    { error: 'Too many discovery requests.', code: 'rate_limited' },
+    {
+      status: 429,
+      headers: { 'Retry-After': String(Math.max(1, Math.ceil((reset - Date.now()) / 1000))) },
+    }
+  )
+}
 
 // ─── Dispatch ─────────────────────────────────────────────────────────────────
 
@@ -314,25 +346,47 @@ export async function POST(req: NextRequest) {
 
   const method = body.method
 
-  // Authenticate and rate-limit through the same gateway as REST. Sport is null
-  // because it arrives in the tool arguments; the mask is enforced per call below.
-  const auth = await gateway(req, null)
-  if (auth instanceof NextResponse) return auth
-  const { context } = auth
+  // ─── Public discovery ───────────────────────────────────────────────────────
+  // `initialize` and `tools/list` describe the server; they return no sports data
+  // and no per-key state, so they need no key. Requiring one made the server
+  // undiscoverable: an MCP client performs the handshake BEFORE it has anywhere
+  // to put credentials, so an unkeyed agent could not even learn that a key was
+  // what it was missing. The tool catalogue is derived from the same manifest the
+  // public landing page already renders, so this discloses nothing new.
+  //
+  // Everything that touches live data still requires a key — see below.
+  if (method === 'initialize' || method === 'tools/list') {
+    const limited = await limitDiscovery(req)
+    if (limited) return limited
 
-  if (method === 'initialize') {
-    return NextResponse.json({
-      protocolVersion: '2024-11-05',
-      capabilities:    { tools: {} },
-      serverInfo:      { name: 'sports-oracle', version: '2.0.0' },
-    })
-  }
+    if (method === 'initialize') {
+      return NextResponse.json({
+        protocolVersion: '2024-11-05',
+        capabilities:    { tools: {} },
+        serverInfo:      { name: 'sports-oracle', version: '2.1.0' },
+        // Surfaced in the handshake so an agent learns the auth requirement at
+        // discovery time rather than by failing its first real call.
+        instructions:
+          'Public discovery: initialize and tools/list need no credentials. ' +
+          'Every tools/call requires an API key via the X-Oracle-Key header ' +
+          '(or Authorization: Bearer). Tier governs access: scout is free, ' +
+          'analyst and above unlock live and in-play tools. ' +
+          'Settlement: only settle when meta.settleable is true — it is computed ' +
+          'per event, so an unfinished or unknown event returns false.',
+      })
+    }
 
-  if (method === 'tools/list') {
     return NextResponse.json({
       tools: TOOLS.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })),
     })
   }
+
+  // ─── Everything below returns data — authenticate ───────────────────────────
+  // Same gateway as REST. Sport is null because it arrives in the tool arguments;
+  // the mask is enforced per call below.
+  const auth = await gateway(req, null)
+  if (auth instanceof NextResponse) return auth
+  const { context } = auth
 
   if (method === 'tools/call') {
     const start    = Date.now()

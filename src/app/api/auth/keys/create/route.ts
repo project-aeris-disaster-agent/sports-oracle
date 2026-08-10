@@ -9,7 +9,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { PrivyClient }               from '@privy-io/server-auth'
 import { createClient }              from '@supabase/supabase-js'
 import crypto                        from 'crypto'
-import { TIERS, type TierName }      from '@/lib/tiers'
+import { TIERS, TIER_ORDER, type TierName } from '@/lib/tiers'
 import { ENTITLED_SPORTS }           from '@/lib/capabilities'
 
 const privy = new PrivyClient(
@@ -49,8 +49,20 @@ export async function POST(req: NextRequest) {
   await req.json().catch(() => ({}))
   const sportMask = ALL_SPORTS
 
-  // ── Determine tier from the current staker session ────────────────────────
-  // Absence of a session is not an error: it means no stake, which means Scout.
+  // ── Determine tier ────────────────────────────────────────────────────────
+  // A staker session is a short-lived verification receipt. Its ABSENCE means
+  // "not verified in the last few minutes" — it does NOT mean "not staked". The
+  // durable record of a stake is stake_commitments, which is already what
+  // verify_api_key gates every request on.
+  //
+  // Treating the two as equivalent silently downgraded real stakers. An account
+  // holding 2,500,000 $DARE against a 1,000,000 requirement minted a free scout
+  // sandbox key because it created the key 32 seconds BEFORE running
+  // verify-stake — and nothing told it. Any mint outside the session window hit
+  // this: stake, walk away, come back later, get a free key and no live data.
+  //
+  // So: session first (it is the freshest signal), then fall back to an active
+  // commitment. Only an account with neither is genuinely Scout.
   const { data: session } = await supabase
     .from('staker_sessions')
     .select('tier, wallet, unlock_at')
@@ -58,14 +70,39 @@ export async function POST(req: NextRequest) {
     .gt('expires_at', new Date().toISOString())
     .maybeSingle()
 
-  const tier: TierName = (session?.tier && session.tier !== 'none')
-    ? session.tier as TierName
-    : 'scout'
+  let tier: TierName = 'scout'
+  let stakedWallet: string | null = null
+
+  if (session?.tier && session.tier !== 'none') {
+    tier         = session.tier as TierName
+    stakedWallet = session.wallet
+  } else {
+    const { data: commitments } = await supabase
+      .from('stake_commitments')
+      .select('tier, wallet')
+      .eq('privy_id', privyUserId)
+      .eq('status', 'active')
+
+    // Highest active commitment wins, should an account hold more than one.
+    const best = (commitments ?? [])
+      .filter(c => c.tier && c.tier !== 'none' && c.tier in TIERS)
+      .sort((a, b) => TIER_ORDER.indexOf(b.tier as TierName) - TIER_ORDER.indexOf(a.tier as TierName))[0]
+
+    if (best) {
+      tier         = best.tier as TierName
+      stakedWallet = best.wallet
+    }
+  }
+
   const config = TIERS[tier]
 
   // Scout has no wallet requirement, so fall back to a stable placeholder — the
   // column is NOT NULL and the key is identified by privy_id regardless.
-  const wallet = session?.wallet ?? `sandbox:${privyUserId}`
+  //
+  // A paid key MUST carry the staked wallet: verify_api_key derives commitment_ok
+  // by matching the key's wallet against the commitment's, so a placeholder here
+  // would mint a key the gateway then rejects as non-compliant on every request.
+  const wallet = stakedWallet ?? `sandbox:${privyUserId}`
 
 
   // ── Mint ──────────────────────────────────────────────────────────────────
