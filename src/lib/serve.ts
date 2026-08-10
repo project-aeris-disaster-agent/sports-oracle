@@ -17,7 +17,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient }              from '@supabase/supabase-js'
 import { gateway, GatewayContext }   from '@/middleware/gateway'
 import { fetchAndCache }             from '@/lib/upstream'
-import { resolve }                   from '@/lib/providers'
+import { resolve, isOpenAndFree }    from '@/lib/providers'
 import { sandboxPayload }            from '@/lib/sandbox'
 
 const supabase = createClient(
@@ -205,13 +205,10 @@ export async function serveCached(opts: ServeOptions): Promise<NextResponse> {
     ? `${sport}:${dataType}:${qualifier}`
     : `${sport}:${dataType}:${qualifier}@${provider.id}`
 
-  // Sandbox exists to protect data we pay for and are licensed to resell — it is
-  // not a paywall for its own sake. A provider that is both unmetered and openly
-  // licensed costs nothing to serve and carries no redistribution restriction, so
-  // handing a free key a synthetic stub instead of the real thing protects nothing
-  // and returns strictly worse data. Those sources are served live at every tier,
-  // which also makes serveCached consistent with /events and /resolve.
-  const openAndFree = provider?.metered === false && provider.license === 'open'
+  // Shared with every other transport — see isOpenAndFree. This used to be
+  // inlined here, which is precisely how the MCP route ended up with no sandbox
+  // handling at all and served licensed payloads to free keys.
+  const openAndFree = isOpenAndFree(sport, dataType)
 
   // 2c. Sandbox short-circuit.
   // Scout keys are free, so they must never reach the upstream provider or read

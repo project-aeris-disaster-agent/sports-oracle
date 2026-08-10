@@ -11,7 +11,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { gateway }                   from '@/middleware/gateway'
 import { logRequest }                from '@/lib/serve'
-import { resolveProvider }           from '@/lib/providers'
+import { resolveProvider, isOpenAndFree } from '@/lib/providers'
 import { RESOLVABLE }                from '@/lib/resolution'
 import { resolverFor }               from '@/lib/resolve-dispatch'
 
@@ -37,6 +37,21 @@ export async function GET(
         note: 'Use /schedule for the raw upstream fixture list.',
       },
       { status: 404 }
+    )
+  }
+
+  // Settlement has no synthetic equivalent — fabricating an outcome would be
+  // worse than refusing one — so a sandbox key is refused on licensed sources
+  // rather than served real licensed data. This route does not pass through
+  // serveCached, so it does not inherit that transport's sandbox short-circuit.
+  if (context.sandbox && !isOpenAndFree(sport, 'results')) {
+    return NextResponse.json(
+      {
+        error: 'Settlement data for this sport comes from a licensed source and is not available on a sandbox key.',
+        code: 'sandbox_licensed_source',
+        sandboxAvailable: RESOLVABLE.filter(s => isOpenAndFree(s, 'results')),
+      },
+      { status: 403 }
     )
   }
 

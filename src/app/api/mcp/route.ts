@@ -24,6 +24,8 @@ import {
   ENTITLED_SPORTS, getSport, getEndpoint, supportedFor, endpointSource, toolCatalog,
 } from '@/lib/capabilities'
 import { resolverFor, resolveEvent, RESOLVERS } from '@/lib/resolve-dispatch'
+import { isOpenAndFree }             from '@/lib/providers'
+import { sandboxPayload }            from '@/lib/sandbox'
 
 // ─── Tool definitions, derived ────────────────────────────────────────────────
 
@@ -158,7 +160,8 @@ function sourceOf(sport: string, path: string) {
 async function handleResolution(
   path: 'events' | 'resolve',
   sport: string,
-  args: Record<string, string>
+  args: Record<string, string>,
+  sandbox: boolean
 ): Promise<ToolOutcome> {
   const resolver = resolverFor(sport)
   if (!resolver) {
@@ -166,6 +169,22 @@ async function handleResolution(
       code: 'resolution_unsupported',
       supported: Object.keys(RESOLVERS),
     })
+  }
+
+  // A normalised outcome has no synthetic equivalent — fabricating a settlement
+  // would be worse than refusing one — so a sandbox key is refused on licensed
+  // sources rather than served real licensed data. The open sources stay fully
+  // available, which is most of the settlement surface, so a free integration
+  // can still be rehearsed end to end.
+  if (sandbox && !isOpenAndFree(sport, 'results')) {
+    return fail(
+      `Settlement data for ${getSport(sport)?.label ?? sport} comes from a licensed source and is not available on a sandbox key.`,
+      403,
+      {
+        code: 'sandbox_licensed_source',
+        sandboxAvailable: Object.keys(RESOLVERS).filter(s => isOpenAndFree(s, 'results')),
+      }
+    )
   }
 
   if (path === 'events') {
@@ -236,7 +255,8 @@ async function handleResolution(
 async function handleTool(
   tool: Tool,
   args: Record<string, string>,
-  tier: keyof typeof TIER_RANK
+  tier: keyof typeof TIER_RANK,
+  sandbox: boolean
 ): Promise<ToolOutcome> {
   const sport = args.sport?.toLowerCase()
   if (!sport) return fail('sport is required.', 400, { code: 'missing_param' })
@@ -263,16 +283,23 @@ async function handleTool(
   // Tier gate, mirroring the REST preflight checks. Names the TOOL, not the
   // endpoint description — interpolating the description made get_verify's
   // denial read as a dump of its own docs rather than an access decision.
+  //
+  // Sandbox keys pass deliberately, exactly as they do on REST: they receive
+  // synthetic data (below), which costs no quota and exposes nothing licensed,
+  // so blocking them would stop a free user rehearsing the very in-play
+  // integration the paid tier exists to serve. That exemption is only sound
+  // BECAUSE the synthetic short-circuit below exists — do not keep one without
+  // the other.
   const need = endpoint.minTier ?? 'scout'
-  if (TIER_RANK[tier] < TIER_RANK[need]) {
+  if (!sandbox && TIER_RANK[tier] < TIER_RANK[need]) {
     return fail(`${tool.name} requires ${need} tier or above.`, 403,
-      { code: 'tier_required', required: need, tier })
+      { code: 'tier_required', required: need, tier, sandboxAvailable: true })
   }
 
   // The resolution surface is normalised and per-sport; it must not be served by
   // the generic pass-through below. See handleResolution.
   if (tool.path === 'events' || tool.path === 'resolve') {
-    return handleResolution(tool.path, sport, args)
+    return handleResolution(tool.path, sport, args, sandbox)
   }
 
   const date = args.date ?? new Date().toISOString().split('T')[0]
@@ -314,6 +341,23 @@ async function handleTool(
   }
 
   const qualifier = qualifierFor(sport, tool.path, keyArgs)
+
+  // Sandbox short-circuit — the same contract serveCached enforces for REST.
+  // Its absence here was a real licence and cost leak: a free scout key calling
+  // this transport received genuine licensed Sportradar payloads and spent paid
+  // quota to fetch them, while the identical REST call correctly returned
+  // synthetic data. Open, unmetered sources stay live because there is nothing
+  // to protect (see isOpenAndFree).
+  if (sandbox && !isOpenAndFree(sport, endpoint.dataType)) {
+    return ok({
+      data: sandboxPayload(sport, endpoint.dataType, qualifier),
+      _source: sourceOf(sport, tool.path),
+      meta: {
+        source: 'sandbox', sandbox: true,
+        note: 'Synthetic data — shapes match production. Stake $DARE to unlock live data.',
+      },
+    }, true)
+  }
 
   try {
     const { data, fromCache } = await getOrFetch({
@@ -423,7 +467,7 @@ export async function POST(req: NextRequest) {
       })
     }
 
-    const outcome = await handleTool(tool, toolArgs, context.tier)
+    const outcome = await handleTool(tool, toolArgs, context.tier, context.sandbox)
 
     // Real cache-hit and latency figures. These were previously hardcoded to
     // false/0, which made every MCP call look like a miss in usage analytics.

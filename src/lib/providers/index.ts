@@ -168,6 +168,24 @@ export function resolveProvider(sport: string, dataType: string, preferred?: str
   return r.reason === 'offline' ? r.provider : ROUTING[sport]?.overrides?.[dataType] ?? ROUTING[sport]?.default
 }
 
+/**
+ * May a sandbox (free) key read this source live?
+ *
+ * Sandbox exists to keep free keys away from data we pay for and are licensed to
+ * resell — not to be a paywall for its own sake. A source that is both unmetered
+ * and openly licensed costs nothing to serve and carries no redistribution
+ * limit, so serving it live to a free key protects nothing and returns strictly
+ * worse data. Everything else must be synthetic.
+ *
+ * Defined once here because every transport has to answer it identically. It was
+ * previously inlined in serveCached only, so the MCP route — which does not go
+ * through serveCached — served licensed Sportradar payloads to sandbox keys.
+ */
+export function isOpenAndFree(sport: string, dataType: string): boolean {
+  const p = resolveProvider(sport, dataType)
+  return p?.metered === false && p.license === 'open'
+}
+
 /** Public-facing attribution for a sport. Safe to render or serialise anywhere. */
 export interface SourceRef {
   id:            ProviderId
