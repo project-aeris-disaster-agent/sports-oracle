@@ -60,7 +60,10 @@ const ENDPOINTS: Record<string, string> = {
   'nfl:depth_charts': '/nfl/official/trial/v7/en/seasons/{season}/REG/{week}/depth_charts.json',
   'nfl:teams':        '/nfl/official/trial/v7/en/league/hierarchy.json',
   'nfl:pbp':          '/nfl/official/trial/v7/en/games/{game_id}/pbp.json',
-  'nfl:summary':      '/nfl/official/trial/v7/en/games/{game_id}/summary.json',
+  // No `nfl:summary`. The NFL v7 feed has no summary.json: the path that used to
+  // sit here returned 404 on every call (verified live 2026-09-02, the only
+  // non-200 in a full probe of this map). Game state and scoring come from
+  // boxscore.json, which `nfl:live` already maps.
   'nfl:transfers':    '/nfl/official/trial/v7/en/league/{year}/{month}/{day}/transactions.json',
   'nfl:free_agents':  '/nfl/official/trial/v7/en/league/free_agents.json',
   'nfl:changes':      '/nfl/official/trial/v7/en/league/{year}/{month}/{day}/changes.json',

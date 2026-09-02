@@ -38,14 +38,11 @@
 import type { ProviderId } from '@/lib/providers'
 
 /**
- * Sports with a normalised resolution mapper.
+ * Sports with a normalised resolution mapper, in the order they were added.
  *
  * Every sport still serves raw pass-through data; this is the subset whose
  * outcomes have been mapped to the settlement contract below. Adding one means
  * writing a mapper, not touching the routes.
- */
-/**
- * Sports with a settlement mapper, in the order they were added.
  *
  * Kept as a literal rather than derived from RESOLVERS because resolve-dispatch
  * imports this module: reading it back would be circular. The pairing is covered
@@ -1349,11 +1346,20 @@ export function fromSportradarGame(sport: string, game: SrGame | null): Resoluti
  * reports every NFL market as unknown.
  */
 function srGames(payload: unknown): SrGame[] {
-  const doc = payload as { games?: unknown[]; weeks?: { games?: unknown[] }[] } | null
+  const doc = payload as {
+    games?:  unknown[]
+    weeks?:  { games?: unknown[] }[]
+    league?: { games?: unknown[] }
+  } | null
 
+  // Three roots, all observed live on 2026-09-02:
+  //   games          NBA / NHL / WNBA / MLB season schedule, NBA / NHL / WNBA daily
+  //   weeks[].games  NFL season schedule
+  //   league.games   MLB daily boxscore, the only document that carries MLB runs
   const rows: unknown[] =
-      Array.isArray(doc?.games) ? doc.games
-    : Array.isArray(doc?.weeks) ? doc.weeks.flatMap(w => w.games ?? [])
+      Array.isArray(doc?.games)         ? doc.games
+    : Array.isArray(doc?.weeks)         ? doc.weeks.flatMap(w => w.games ?? [])
+    : Array.isArray(doc?.league?.games) ? doc.league.games
     : []
 
   // MLB's daily document is a boxscore feed, which wraps each entry as
