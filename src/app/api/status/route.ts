@@ -27,7 +27,7 @@ export async function GET() {
       // faults, which pinned this field at 'degraded' forever and made it
       // useless as a backoff signal.
       service: summary.serving === 0 || summary.offline === summary.serving ? 'down'
-             : summary.limited + summary.offline > 0 ? 'degraded'
+             : summary.belowDeclared > 0 ? 'degraded'
              : 'operational',
       checkedAt: new Date().toISOString(),
       // Flags whether these numbers are live or the declared fallback, so a
@@ -41,6 +41,8 @@ export async function GET() {
         serving:     summary.serving,
         /** Published in the registry but not served. Inventory, not a fault. */
         registered:  summary.registered,
+        /** Sports currently worse than their declared status. Drives `service`. */
+        degraded:    summary.belowDeclared,
       },
       // Deliberately qualitative. Quota sizes, utilisation and remaining-call
       // counts describe our capacity and cost structure — they belong on the

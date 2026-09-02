@@ -231,7 +231,16 @@ export async function getLiveStatus(): Promise<LiveSportStatus[]> {
  */
 export function summarise(list: LiveSportStatus[]) {
   const serving = list.filter(s => s.entitled)
+  const declared = new Map(SPORTS.map(s => [s.key, s.status]))
   return {
+    /**
+     * Sports currently BELOW their declared status. This, not the raw limited
+     * count, is what "degraded" should mean: MMA is declared `limited` because
+     * its quota is small, and that is a statement about capacity we made on
+     * purpose, not a fault. Counting it made the service verdict read
+     * "degraded" in every response ever sent, which is no signal at all.
+     */
+    belowDeclared: serving.filter(s => STATUS_RANK[s.status] < STATUS_RANK[declared.get(s.key) ?? 'online']).length,
     online:  serving.filter(s => s.status === 'online').length,
     limited: serving.filter(s => s.status === 'limited').length,
     offline: serving.filter(s => s.status === 'offline').length,

@@ -34,7 +34,7 @@ export async function POST(req: NextRequest) {
   }
 
   const service = summary.serving === 0 || summary.offline === summary.serving ? 'down'
-                : summary.limited + summary.offline > 0 ? 'degraded'
+                : summary.belowDeclared > 0 ? 'degraded'
                 : 'operational'
 
   const { error } = await supabase.from('status_history').insert({
