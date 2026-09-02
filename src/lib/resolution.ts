@@ -44,7 +44,18 @@ import type { ProviderId } from '@/lib/providers'
  * outcomes have been mapped to the settlement contract below. Adding one means
  * writing a mapper, not touching the routes.
  */
-export const RESOLVABLE = ['f1', 'soccer', 'dota2', 'agentfighter']
+/**
+ * Sports with a settlement mapper, in the order they were added.
+ *
+ * Kept as a literal rather than derived from RESOLVERS because resolve-dispatch
+ * imports this module: reading it back would be circular. The pairing is covered
+ * by assertResolvableMatchesResolvers() in resolve-dispatch.ts, which fails loudly
+ * at module load if the two ever disagree, so the duplication cannot rot silently.
+ */
+export const RESOLVABLE = [
+  'f1', 'soccer', 'dota2', 'agentfighter',
+  'nba', 'nhl', 'wnba', 'nfl', 'mlb', 'tennis', 'mma',
+]
 
 export type ResolutionStatus =
   | 'scheduled'    // event exists, has not started
@@ -1110,4 +1121,460 @@ export function fromOpenF1(
       ...investigations,
     ],
   }
+}
+
+// ─── Sportradar ──────────────────────────────────────────────────────────────
+//
+// Sportradar covers seven of our nine serving sports and is the licensed,
+// authoritative distributor for all of them, yet it had no settlement mapper at
+// all: RESOLVERS held only f1, soccer, dota2 and agentfighter. That was an
+// accident of build order rather than a decision. The resolution layer arrived
+// with the multivertical expansion, the Sportradar sports predate it, and nobody
+// went back. Nothing in this file, the provider registry or the build plans ever
+// argued Sportradar should be excluded, and providers/sportradar.ts has carried
+// `authoritative: true` throughout.
+//
+// The practical effect was that a prediction market could price NBA, NFL, NHL,
+// MLB, WNBA, tennis and MMA off our data but could not settle any of them.
+//
+// ─── Finality: `closed` settles, `complete` does not ─────────────────────────
+// Sportradar publishes two distinct end states, and the difference is exactly
+// the provisional/official boundary this contract needs:
+//
+//   complete  play has finished, statistics are not yet reviewed
+//   closed    statistics reviewed and final
+//
+// So `closed` maps to official and `complete` maps to provisional. That is a
+// real upstream signal rather than an ageing heuristic like the Dota 2 window,
+// which makes these the strongest settlement sources here after Agent Fighter.
+//
+// ─── Two payload families ────────────────────────────────────────────────────
+// Every shape below was verified against payloads observed in our own cache on
+// 2026-09-02, not taken from documentation:
+//
+//   games      NBA, NHL, WNBA, NFL, MLB. A game object with home/away team
+//              objects. Points live in THREE different places depending on the
+//              sport, which is the reason pointsOf() exists.
+//   summaries  tennis, MMA. The unified v2/v3 sport_event + sport_event_status
+//              envelope, carrying an explicit winner_id.
+
+/** Sportradar statuses meaning no result will be produced. */
+const SR_VOID: Record<string, VoidReason> = {
+  cancelled:   'cancelled',
+  postponed:   'postponed',
+  abandoned:   'abandoned',
+  unnecessary: 'cancelled',
+}
+
+/**
+ * Statuses where play has finished.
+ *
+ * Both are terminal for knowing who won, but only `closed` is settleable, so the
+ * two must stay distinguishable rather than collapsing into one "finished".
+ */
+const SR_FINISHED = new Set(['closed', 'complete'])
+const SR_LIVE     = new Set(['inprogress', 'halftime', 'delayed', 'suspended'])
+
+interface SrTeam {
+  id?:     string
+  name?:   string
+  market?: string
+  alias?:  string
+  abbr?:   string
+  points?: number
+  runs?:   number
+}
+
+interface SrGame {
+  id?:          string
+  status?:      string
+  scheduled?:   string
+  home?:        SrTeam
+  away?:        SrTeam
+  home_points?: number
+  away_points?: number
+  scoring?:     { home_points?: number; away_points?: number }
+  season?:      { year?: number | string; type?: string }
+}
+
+/**
+ * A team's score, wherever this sport happens to keep it.
+ *
+ * Verified placements, all three live in our cache today:
+ *   NBA / NHL / WNBA   game.home_points          top level, beside the teams
+ *   NFL                game.scoring.home_points  nested under scoring
+ *   MLB                game.home.runs            on the team object; the MLB
+ *                                                schedule document carries no
+ *                                                top-level points at all
+ *
+ * Returning null rather than 0 for absent matters: 0 is a legitimate score in
+ * every one of these sports, and conflating the two would settle a scoreless
+ * game as a draw against a team that simply has no reported score yet.
+ */
+function pointsOf(game: SrGame, side: 'home' | 'away'): number | null {
+  const key  = side === 'home' ? 'home_points' : 'away_points'
+  const team = game[side]
+  const candidates = [game[key], game.scoring?.[key], team?.points, team?.runs]
+  const found = candidates.find(v => typeof v === 'number')
+  return typeof found === 'number' ? found : null
+}
+
+/** Display name. MLB splits the club across market and name: "San Diego" + "Padres". */
+function teamName(t: SrTeam | undefined, fallback: string): string {
+  if (!t) return fallback
+  const full = [t.market, t.name].filter(Boolean).join(' ').trim()
+  return full || t.alias || t.abbr || fallback
+}
+
+function srCompetitor(
+  game:     SrGame,
+  side:     'home' | 'away',
+  opponent: 'home' | 'away',
+  finished: boolean,
+  started:  boolean
+): Competitor {
+  const team   = game[side]
+  const mine   = pointsOf(game, side)
+  const theirs = pointsOf(game, opponent)
+  const known  = finished && mine !== null && theirs !== null
+
+  const won  = known && mine! > theirs!
+  const drew = known && mine! === theirs!
+  const label = teamName(team, side === 'home' ? 'Home' : 'Away')
+
+  return {
+    competitor_id: team?.id ?? side,
+    name:          label,
+    // In a league fixture the competitor IS the team, so team mirrors the
+    // identity rather than inventing a parent org. Same choice as the Dota 2 mapper.
+    team_id:       team?.id ?? null,
+    team:          label,
+
+    // A draw leaves both sides on position 1. There is no second place in a tie,
+    // and ranking one below the other would silently invent a winner.
+    position:      known ? (drew || won ? 1 : 2) : null,
+    position_text: known ? (drew ? 'D' : won ? 'W' : 'L') : '',
+    status:        known ? (drew ? 'Draw' : won ? 'Won' : 'Lost')
+                         : started ? 'In progress' : 'Scheduled',
+
+    finished,
+    started,
+
+    laps:   null,
+    // Home advantage is a real pricing input, and grid is the only free numeric
+    // slot in the contract that can carry it. 1 = home, 2 = away, matching soccer.
+    grid:   side === 'home' ? 1 : 2,
+    points: mine,
+  }
+}
+
+/** Normalises one Sportradar game object: NBA, NHL, WNBA, NFL, MLB. */
+export function fromSportradarGame(sport: string, game: SrGame | null): Resolution | null {
+  if (!game?.id) return null
+
+  const observedAt = new Date().toISOString()
+  const rawStatus  = (game.status ?? '').toLowerCase()
+
+  const finished = SR_FINISHED.has(rawStatus)
+  const started  = finished || SR_LIVE.has(rawStatus)
+  const voidedAs = SR_VOID[rawStatus]
+
+  const home = srCompetitor(game, 'home', 'away', finished, started)
+  const away = srCompetitor(game, 'away', 'home', finished, started)
+
+  const base = {
+    event_id:     game.id,
+    sport,
+    name:         `${away.name} at ${home.name}`,
+    season:       String(game.season?.year ?? new Date(game.scheduled ?? Date.now()).getUTCFullYear()),
+    round:        game.season?.type ?? null,
+    scheduled_at: game.scheduled ? new Date(game.scheduled).toISOString() : null,
+    competitors:  [home, away],
+    source:        'sportradar' as ProviderId,
+    authoritative: true,
+    observed_at:   observedAt,
+  }
+
+  if (voidedAs) {
+    return {
+      ...base,
+      status: 'void', winner_id: null, winner: null,
+      official: true, void_reason: voidedAs,
+      finalized_at: observedAt,
+      notes: [`Game ${rawStatus} — no result.`],
+    }
+  }
+
+  // Only `closed` settles. See the finality note above.
+  const official = rawStatus === 'closed' && home.points !== null && away.points !== null
+  const status: ResolutionStatus = official ? 'official'
+    : finished ? 'provisional'
+    : started  ? 'live'
+    :            'scheduled'
+
+  const drew   = home.points !== null && away.points !== null && home.points === away.points
+  const winner = official && !drew ? (home.points! > away.points! ? home : away) : null
+
+  const notes: string[] = []
+  if (rawStatus === 'complete') {
+    notes.push(
+      'Sportradar reports this game as `complete`: play has finished but the statistics '
+      + 'are not yet reviewed. Held at provisional until the status becomes `closed`, '
+      + 'which is the settleable state.'
+    )
+  }
+  if (finished && (home.points === null || away.points === null)) {
+    notes.push('Game is finished but a score is missing from the upstream document — not settleable.')
+  }
+  if (drew && official) notes.push('Draw — no winner.')
+
+  return {
+    ...base,
+    status,
+    winner_id:    winner?.competitor_id ?? null,
+    winner:       winner?.name ?? null,
+    official,
+    void_reason:  null,
+    finalized_at: official ? observedAt : null,
+    notes,
+  }
+}
+
+/**
+ * Walks a Sportradar schedule document to its games.
+ *
+ * NBA, NHL, WNBA and MLB expose a flat `games` array. NFL nests them a level
+ * deeper under `weeks[].games[]`, which is why this is a function rather than a
+ * property read: resolving an NFL game against `payload.games` finds nothing and
+ * reports every NFL market as unknown.
+ */
+function srGames(payload: unknown): SrGame[] {
+  const doc = payload as { games?: unknown[]; weeks?: { games?: unknown[] }[] } | null
+
+  const rows: unknown[] =
+      Array.isArray(doc?.games) ? doc.games
+    : Array.isArray(doc?.weeks) ? doc.weeks.flatMap(w => w.games ?? [])
+    : []
+
+  // MLB's daily document is a boxscore feed, which wraps each entry as
+  // `{ game: {...} }` rather than putting the game at the top of the row. Every
+  // other sport's daily and season documents are unwrapped. Normalising here
+  // rather than in each caller keeps the two shapes from leaking outwards, and
+  // an unwrapped row is passed through untouched, so this is a no-op everywhere
+  // else.
+  return rows.map(r => {
+    const row = r as { game?: SrGame }
+    return (row?.game ?? row) as SrGame
+  })
+}
+
+export function eventsFromSportradarGames(sport: string, payload: unknown): EventRef[] {
+  return srGames(payload)
+    .filter(g => g.id)
+    .map(g => ({
+      event_id:     g.id!,
+      sport,
+      name:         `${teamName(g.away, 'Away')} at ${teamName(g.home, 'Home')}`,
+      season:       String(g.season?.year ?? new Date(g.scheduled ?? Date.now()).getUTCFullYear()),
+      round:        g.season?.type ?? null,
+      scheduled_at: g.scheduled ? new Date(g.scheduled).toISOString() : null,
+      source:       'sportradar' as ProviderId,
+    }))
+}
+
+/** Finds one game in a cached schedule document, flat or week-nested. */
+export function findSportradarGame(payload: unknown, gameId: string): SrGame | null {
+  return srGames(payload).find(g => g.id === gameId) ?? null
+}
+
+// ─── Sportradar unified feed: tennis and MMA ─────────────────────────────────
+
+interface SrEventCompetitor {
+  id?:           string
+  name?:         string
+  qualifier?:    string
+  abbreviation?: string
+  seed?:         number
+}
+
+interface SrSummary {
+  sport_event?: {
+    id?:          string
+    start_time?:  string
+    competitors?: SrEventCompetitor[]
+    sport_event_context?: {
+      season?:      { name?: string; year?: string }
+      round?:       { name?: string }
+      competition?: { name?: string }
+    }
+  }
+  sport_event_status?: {
+    status?:       string
+    match_status?: string
+    winner_id?:    string
+    home_score?:   number
+    away_score?:   number
+    /** MMA only: the finish method, e.g. ko_tko, submission, decision. */
+    method?:       string
+    final_round?:  number
+    title_fight?:  boolean
+  }
+}
+
+/**
+ * Normalises one tennis or MMA summary.
+ *
+ * Structurally simpler than the game mapper because the upstream states the
+ * outcome directly: sport_event_status.winner_id names the winner, so there is
+ * no score comparison to get wrong. Scores are still carried as `points` (sets
+ * won, in tennis) because they are a legitimate input for handicap and total
+ * markets.
+ *
+ * MMA's `method` is surfaced in notes rather than mapped into the contract.
+ * Method-of-victory is a market type, and per this file's opening boundary the
+ * data layer reports facts while the market layer decides what they pay. A
+ * `method` field here would be the first step towards encoding market rules in
+ * the data layer.
+ */
+export function fromSportradarSummary(sport: string, s: SrSummary | null): Resolution | null {
+  const event = s?.sport_event
+  const state = s?.sport_event_status
+  if (!event?.id) return null
+
+  const observedAt = new Date().toISOString()
+  const rawStatus  = (state?.status ?? '').toLowerCase()
+
+  const finished = SR_FINISHED.has(rawStatus)
+  const started  = finished || SR_LIVE.has(rawStatus)
+  const voidedAs = SR_VOID[rawStatus]
+
+  const ctx      = event.sport_event_context
+  const hasWinner = Boolean(state?.winner_id)
+
+  const competitors: Competitor[] = (event.competitors ?? []).map(c => {
+    const won   = finished && hasWinner && c.id === state!.winner_id
+    const score = c.qualifier === 'home' ? state?.home_score : state?.away_score
+    return {
+      competitor_id: c.id ?? '',
+      name:          c.name ?? c.abbreviation ?? '',
+      // Tennis singles and MMA are individual sports; there is no club.
+      team_id:       null,
+      team:          null,
+
+      position:      finished && hasWinner ? (won ? 1 : 2) : null,
+      position_text: finished && hasWinner ? (won ? 'W' : 'L') : '',
+      status:        finished && hasWinner ? (won ? 'Won' : 'Lost')
+                     : started ? 'In progress' : 'Scheduled',
+
+      finished,
+      // A walkover or retirement still carries a winner_id, so the presence of an
+      // outcome must never be read as proof that both competitors started.
+      started,
+
+      laps:   null,
+      // Seeding is a genuine pricing input and grid is the only free numeric slot
+      // here. Null for MMA, which publishes no seed.
+      grid:   typeof c.seed === 'number' ? c.seed : null,
+      points: typeof score === 'number' ? score : null,
+    }
+  })
+
+  const base = {
+    event_id:     event.id,
+    sport,
+    name:         competitors.length === 2
+      ? `${competitors[0].name} vs ${competitors[1].name}`
+      : ctx?.competition?.name ?? event.id,
+    season:       ctx?.season?.year ?? String(new Date(event.start_time ?? Date.now()).getUTCFullYear()),
+    round:        ctx?.round?.name ?? null,
+    scheduled_at: event.start_time ? new Date(event.start_time).toISOString() : null,
+    competitors,
+    source:        'sportradar' as ProviderId,
+    authoritative: true,
+    observed_at:   observedAt,
+  }
+
+  if (voidedAs) {
+    return {
+      ...base,
+      status: 'void', winner_id: null, winner: null,
+      official: true, void_reason: voidedAs,
+      finalized_at: observedAt,
+      notes: [`Event ${rawStatus} — no result.`],
+    }
+  }
+
+  // Same rule as the game mapper: `closed` settles, `complete` does not. A
+  // winner_id must also be present; a finished event with no stated winner is not
+  // something to guess at.
+  const official = rawStatus === 'closed' && hasWinner
+  const status: ResolutionStatus = official ? 'official'
+    : finished ? 'provisional'
+    : started  ? 'live'
+    :            'scheduled'
+
+  const winner = official
+    ? competitors.find(c => c.competitor_id === state!.winner_id) ?? null
+    : null
+
+  const notes: string[] = []
+  if (rawStatus === 'complete') {
+    notes.push(
+      'Sportradar reports this event as `complete`: the result is known but the '
+      + 'statistics are not yet reviewed. Held at provisional until `closed`.'
+    )
+  }
+  if (finished && !hasWinner) {
+    notes.push('Event is finished but the upstream states no winner_id — not settleable.')
+  }
+  if (state?.method) {
+    notes.push(
+      `Method of victory: ${state.method}`
+      + (state.final_round ? ` in round ${state.final_round}` : '')
+      + '. Reported as a fact — method and round markets are settled by the market layer, not here.'
+    )
+  }
+  if (state?.match_status && state.match_status !== 'ended') {
+    notes.push(`Upstream match_status is "${state.match_status}".`)
+  }
+
+  return {
+    ...base,
+    status,
+    winner_id:    winner?.competitor_id ?? null,
+    winner:       winner?.name ?? null,
+    official,
+    void_reason:  null,
+    finalized_at: official ? observedAt : null,
+    notes,
+  }
+}
+
+function srSummaries(payload: unknown): SrSummary[] {
+  const doc = payload as { summaries?: SrSummary[] } | null
+  return Array.isArray(doc?.summaries) ? doc.summaries : []
+}
+
+export function eventsFromSportradarSummaries(sport: string, payload: unknown): EventRef[] {
+  return srSummaries(payload)
+    .filter(s => s.sport_event?.id)
+    .map(s => {
+      const e     = s.sport_event!
+      const ctx   = e.sport_event_context
+      const names = (e.competitors ?? []).map(c => c.name ?? c.abbreviation ?? '').filter(Boolean)
+      return {
+        event_id:     e.id!,
+        sport,
+        name:         names.length === 2 ? `${names[0]} vs ${names[1]}` : ctx?.competition?.name ?? e.id!,
+        season:       ctx?.season?.year ?? String(new Date(e.start_time ?? Date.now()).getUTCFullYear()),
+        round:        ctx?.round?.name ?? null,
+        scheduled_at: e.start_time ? new Date(e.start_time).toISOString() : null,
+        source:       'sportradar' as ProviderId,
+      }
+    })
+}
+
+/** Finds one event in a cached daily summaries document. */
+export function findSportradarSummary(payload: unknown, eventId: string): SrSummary | null {
+  return srSummaries(payload).find(s => s.sport_event?.id === eventId) ?? null
 }

@@ -114,11 +114,36 @@ export async function getLiveStatus(): Promise<LiveSportStatus[]> {
   }
 }
 
+/**
+ * Aggregate health.
+ *
+ * The counts are over ENTITLED sports only, and that distinction is the whole
+ * point of this function.
+ *
+ * The registry deliberately carries sports we do not serve — 16 of them, mostly
+ * esports titles whose publishers do not license redistribution. providers/types.ts
+ * argues at length that publishing an unreachable source as `offline` is better
+ * than pretending it does not exist, and that argument stands. But those entries
+ * were also being counted here, so `offline` was never zero, and the service
+ * verdict derived from it reported "degraded" permanently, in every response,
+ * regardless of whether anything was actually wrong.
+ *
+ * A health signal that never says "healthy" carries no information. A customer
+ * polling /api/status to decide whether to back off learned nothing from it, and
+ * a real outage looked identical to a normal Tuesday. So the verdict is scoped to
+ * the sports we actually undertake to serve; `registered` reports the rest
+ * separately, because it is inventory, not health.
+ */
 export function summarise(list: LiveSportStatus[]) {
+  const serving = list.filter(s => s.entitled)
   return {
-    online:  list.filter(s => s.status === 'online').length,
-    limited: list.filter(s => s.status === 'limited').length,
-    offline: list.filter(s => s.status === 'offline').length,
+    online:  serving.filter(s => s.status === 'online').length,
+    limited: serving.filter(s => s.status === 'limited').length,
+    offline: serving.filter(s => s.status === 'offline').length,
+    /** Total entitled sports, i.e. the denominator the counts above are out of. */
+    serving: serving.length,
+    /** Registered but not entitled. Inventory we publish, not a fault. */
+    registered: list.length - serving.length,
     live:    list.some(s => s.live),
   }
 }

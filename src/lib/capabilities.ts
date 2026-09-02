@@ -200,6 +200,28 @@ const RESOLVE: EndpointSpec = {
   signal: 'Settlement source. Only settle when meta.settleable is true — it is computed per event, so an unfinished or unknown event returns false.',
 }
 
+// ─── Sportradar resolution surface ────────────────────────────────────────────
+// EVENTS/RESOLVE for the seven Sportradar sports. Declared separately from the
+// shared EVENTS/RESOLVE constants because the TTLs differ for a structural
+// reason: these resolvers read a SHARED document (a season schedule, or a day's
+// summaries) rather than a per-event one, so they cannot use the 30-day official
+// promotion and instead depend on a short pending TTL to stay current. See the
+// caching note in lib/resolve-dispatch.ts.
+const SR_EVENTS: EndpointSpec = {
+  ...EVENTS,
+  desc: 'Normalised event registry (id, teams, scheduled time)',
+  signal: 'The stable game id a market binds to before tip-off. For tennis and MMA '
+        + 'the id carries its date, which makes later resolution a single read.',
+}
+
+const SR_RESOLVE: EndpointSpec = {
+  ...RESOLVE,
+  ttl: 300,
+  signal: 'Settlement source. Sportradar publishes `complete` (played, stats unreviewed) '
+        + 'and `closed` (stats final) as separate states; only `closed` reports '
+        + 'official. Settle when meta.settleable is true, never on `complete`.',
+}
+
 type SportDecl = Omit<SportSpec, 'sources'>
 
 const DECLARED: SportDecl[] = [
@@ -208,14 +230,14 @@ const DECLARED: SportDecl[] = [
     note: '/transactions is date-scoped — pass ?date=YYYY-MM-DD for a specific day. '
         + '/free-agents is a large league-wide document (~725KB); use ?limit= or ?fields= '
         + 'unless you genuinely need every unsigned player.',
-    endpoints: [...core('nba'), INJURIES, LEADERS, TEAMS, PBP, TRANSACTIONS, FREE_AGENTS, CHANGE_LOG],
+    endpoints: [SR_EVENTS, SR_RESOLVE, ...core('nba'), INJURIES, LEADERS, TEAMS, PBP, TRANSACTIONS, FREE_AGENTS, CHANGE_LOG],
   },
   {
     key: 'nhl', label: 'NHL', entitled: true, status: 'online', statusNote: 'All endpoints live', capacity: 'high', teamBased: true, season: '2025',
     note: 'NHL/NFL/MLB nest the free-agent list under `league.free_agents`; NBA and WNBA '
         + 'return it at the top level. Verified against the live feed, not normalised — '
         + 'this is a pass-through surface.',
-    endpoints: [...core('nhl'), INJURIES, LEADERS, TEAMS, PBP, TRANSACTIONS, FREE_AGENTS, CHANGE_LOG],
+    endpoints: [SR_EVENTS, SR_RESOLVE, ...core('nhl'), INJURIES, LEADERS, TEAMS, PBP, TRANSACTIONS, FREE_AGENTS, CHANGE_LOG],
   },
   {
     key: 'nfl', label: 'NFL', entitled: true, status: 'online', statusNote: 'All endpoints live', capacity: 'high', teamBased: true, season: '2025',
@@ -223,6 +245,7 @@ const DECLARED: SportDecl[] = [
         + '/free-agents is very large here (~2.4MB, 8k+ players) and nests under '
         + '`league.free_agents` — pass ?limit= unless you need the whole list.',
     endpoints: [
+      SR_EVENTS, SR_RESOLVE,
       ...core('nfl', { scores: false }),
       TRANSACTIONS, FREE_AGENTS, CHANGE_LOG,
       { ...INJURIES, params: ['season?', 'week?'] },
@@ -235,11 +258,11 @@ const DECLARED: SportDecl[] = [
   {
     key: 'mlb', label: 'MLB', entitled: true, status: 'online', statusNote: 'All endpoints live · in season', capacity: 'high', teamBased: true, season: '2026',
     note: 'Free agents nest under `league.free_agents` on this feed.',
-    endpoints: [...core('mlb'), INJURIES, TEAMS, PBP, TRANSACTIONS, FREE_AGENTS, CHANGE_LOG],
+    endpoints: [SR_EVENTS, SR_RESOLVE, ...core('mlb'), INJURIES, TEAMS, PBP, TRANSACTIONS, FREE_AGENTS, CHANGE_LOG],
   },
   {
     key: 'wnba', label: 'WNBA', entitled: true, status: 'online', statusNote: 'All endpoints live · in season', capacity: 'medium', teamBased: true, season: '2026',
-    endpoints: [...core('wnba'), INJURIES, TEAMS, PBP, TRANSACTIONS, FREE_AGENTS, CHANGE_LOG],
+    endpoints: [SR_EVENTS, SR_RESOLVE, ...core('wnba'), INJURIES, TEAMS, PBP, TRANSACTIONS, FREE_AGENTS, CHANGE_LOG],
   },
   {
     key: 'tennis', label: 'Tennis', entitled: true, status: 'online', statusNote: 'All endpoints live · in season', capacity: 'high', teamBased: false, season: '2026',
@@ -369,20 +392,20 @@ const DECLARED: SportDecl[] = [
   // forgot, and it is the same argument providers/types.ts makes for `offline`
   // being a first-class provider state.
   {
-    key: 'dota2', label: 'Dota 2', entitled: true, status: 'limited', group: 'esports',
-    statusNote: 'Wired · live probe pending (OpenDota API down at build time)',
+    key: 'dota2', label: 'Dota 2', entitled: true, status: 'online', group: 'esports',
+    statusNote: 'Match-level resolution · settleable',
     capacity: 'high', teamBased: true, season: '2026',
-    // NOT 'online' yet, deliberately. Every other entry in this file was verified
-    // against the live upstream; OpenDota's API was returning HTTP 522 (Cloudflare
-    // cannot reach origin) throughout the build, so the field mapping comes from
-    // its documented schema rather than an observed response. The mapper logic and
-    // the router wiring ARE verified; the field NAMES are not.
+    // Promoted from 'limited' on 2026-09-02. The previous caveat was that OpenDota
+    // returned HTTP 522 throughout the original build, so the field mapping came
+    // from documented schema rather than an observed response.
     //
-    // To promote to 'online': GET https://api.opendota.com/api/proMatches and
-    // confirm a row carries match_id, radiant_win, radiant_name, dire_name,
-    // radiant_score, dire_score, start_time, duration and leagueid. If those hold,
-    // flip this to 'online' and drop the probe caveat from statusNote — no code
-    // change is required, because that is exactly what providers/opendota.ts reads.
+    // The promotion check this file specified has now been run against the live
+    // API: GET https://api.opendota.com/api/proMatches returned 200 with 100 rows,
+    // and the first row carried match_id, radiant_win, radiant_name, dire_name,
+    // radiant_score, dire_score, start_time, duration, leagueid, series_id and
+    // series_type — every field providers/opendota.ts reads, with the documented
+    // types. Production has also been warming dota2:schedule:pro hourly without
+    // error, so this is observed behaviour and not a one-off probe.
     note: 'The only esports title with an open, redistributable, match-level feed. '
         + 'Served from OpenDota (MIT), whose `radiant_win` originates in the Valve WebAPI — '
         + 'the publisher\'s own record, which is what makes it settleable. '

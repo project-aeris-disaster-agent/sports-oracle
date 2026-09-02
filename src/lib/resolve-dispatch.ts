@@ -7,7 +7,7 @@
 // route edits, which is the same plug-and-play rule the provider registry follows.
 
 import { getOrFetch }        from '@/lib/serve'
-import { currentSeason, recacheWithTtl } from '@/lib/upstream'
+import { currentSeason, recacheWithTtl, dateParams } from '@/lib/upstream'
 import { qualifierFor }      from '@/lib/cache-key'
 import { ttlFor }            from '@/lib/capabilities'
 import { resolveProvider }   from '@/lib/providers'
@@ -16,6 +16,9 @@ import {
   fromTxLine,   eventsFromTxLine,
   fromOpenDota, eventsFromOpenDota, findDotaMatch,
   fromAgentFighter, eventsFromAgentFighter, findAgentFighterMatch, agentFighterMatches,
+  fromSportradarGame,    eventsFromSportradarGames,     findSportradarGame,
+  fromSportradarSummary, eventsFromSportradarSummaries, findSportradarSummary,
+  RESOLVABLE,
   type Resolution, type EventRef,
 } from '@/lib/resolution'
 
@@ -302,7 +305,243 @@ const agentfighter: SportResolver = {
   },
 }
 
-export const RESOLVERS: Record<string, SportResolver> = { f1, soccer, dota2, agentfighter }
+
+// ─── Sportradar ──────────────────────────────────────────────────────────────
+//
+// Seven sports, two resolver shapes, one shared rule about caching.
+//
+// ─── Why these resolvers opt out of the 30-day promotion ─────────────────────
+// resolveEvent() pins a document to TTL_OFFICIAL the first time it yields an
+// official result, on the reasoning that an official result never changes. That
+// reasoning holds only when the document describes ONE event.
+//
+// Every Sportradar document here describes many: a season schedule carries a
+// whole season, a daily document carries every game that day. Pinning the NBA
+// season schedule for 30 days because one game finished would freeze the other
+// 1,229 games in it at whatever status they happened to hold, and every
+// subsequent resolution would read that frozen copy. So these resolvers return
+// an EMPTY cacheKey, which is the documented opt-out, and rely on the short
+// pending TTL instead. The cost is one upstream fetch per pending window per
+// sport, shared across every event in it, which is cheaper than the per-event
+// fetch the promotion would have saved.
+
+/**
+ * Pending-read TTL for a shared results document.
+ *
+ * Deliberately short and deliberately NOT the manifest TTL for these paths. The
+ * season schedule is warmed weekly because it is a registry, and a registry that
+ * old is fine for listing fixtures. Reading a settlement out of a seven-day-old
+ * document is not: a game that finished this afternoon would still report
+ * `scheduled`. The registry and the settlement read are different jobs against
+ * the same document, so they get different lifetimes.
+ */
+const SR_PENDING_TTL = 300
+
+/** Season-registry TTL. Matches the manifest's schedule TTL intent. */
+const SR_EVENTS_TTL = 86400
+
+/**
+ * Sports whose season schedule already carries final scores.
+ *
+ * Verified in cache 2026-09-02: NBA, NHL and WNBA put `home_points`/`away_points`
+ * on the game, and NFL puts them under `scoring`. MLB does NOT — its schedule
+ * document carries no scores at any depth, so MLB alone has to go to the daily
+ * document for them. Encoding that as data rather than a branch keeps the
+ * resolver itself uniform.
+ */
+const SR_SCORES_IN_SCHEDULE = new Set(['nba', 'nhl', 'wnba', 'nfl'])
+
+/** Builds a team-sport resolver (NBA, NHL, WNBA, NFL, MLB). */
+function sportradarGameResolver(): SportResolver {
+  return {
+    idFormat: 'a Sportradar game id (UUID), e.g. 820c5325-360f-4b9e-a67c-77fe71338871',
+
+    async events(sport, q) {
+      const season = q.season ?? currentSeason(sport)
+      const { data, fromCache } = await getOrFetch({
+        sport, dataType: 'schedule', qualifier: season,
+        ttl: ttlFor(sport, 'schedule', SR_EVENTS_TTL), params: { season },
+      })
+      return { events: eventsFromSportradarGames(sport, data), fromCache, season }
+    },
+
+    async resolve(sport, eventId) {
+      const id = eventId.trim()
+      // Sportradar game ids are UUIDs. Rejecting anything else here is what lets
+      // resolveEvent tell a malformed id from an unknown one.
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+        return { resolution: null, fromCache: false, cacheKey: '', dataType: '' }
+      }
+
+      const season = currentSeason(sport)
+
+      // The season schedule is both the registry and, for most of these sports,
+      // the results document. Read under the short pending TTL — see above.
+      const { data: schedule, fromCache } = await getOrFetch({
+        sport, dataType: 'schedule', qualifier: season,
+        ttl: SR_PENDING_TTL, params: { season },
+      })
+
+      const game = findSportradarGame(schedule, id)
+      if (!game) {
+        // The upstream WAS queried and simply does not know this id in this
+        // season. That is not-found, not malformed, so dataType stays non-empty.
+        return { resolution: null, fromCache, cacheKey: '', dataType: 'schedule' }
+      }
+
+      if (SR_SCORES_IN_SCHEDULE.has(sport)) {
+        return { resolution: fromSportradarGame(sport, game), fromCache, cacheKey: '', dataType: 'schedule' }
+      }
+
+      // MLB: the schedule knows the fixture and its status but carries no runs,
+      // so the daily document is the only place the score exists. Best-effort —
+      // if it cannot be read we still return the schedule's view, which reports
+      // finished-without-a-score as provisional and says so in `notes` rather
+      // than inventing a settlement.
+      const date = game.scheduled?.split('T')[0]
+      if (!date) {
+        return { resolution: fromSportradarGame(sport, game), fromCache, cacheKey: '', dataType: 'schedule' }
+      }
+
+      try {
+        const { data: daily } = await getOrFetch({
+          sport, dataType: 'scores', qualifier: date,
+          ttl: ttlFor(sport, 'scores', SR_PENDING_TTL), params: dateParams(date),
+        })
+        const scored = findSportradarGame(daily, id)
+        if (scored) {
+          return { resolution: fromSportradarGame(sport, scored), fromCache: false, cacheKey: '', dataType: 'scores' }
+        }
+      } catch {
+        // Fall through to the schedule view. A daily-document failure must not
+        // turn a resolvable event into an error.
+      }
+
+      return { resolution: fromSportradarGame(sport, game), fromCache, cacheKey: '', dataType: 'schedule' }
+    },
+  }
+}
+
+/**
+ * Builds a unified-feed resolver (tennis, MMA).
+ *
+ * ─── Why the id may carry a date ────────────────────────────────────────────
+ * These sports are addressed by DATE upstream: there is no per-event endpoint on
+ * our key, only `/schedules/{date}/summaries.json`. A bare `sr:sport_event:...`
+ * id does not say which day it belongs to, so resolving one means knowing the
+ * date or searching for it.
+ *
+ * Both are supported. `{id}@{YYYY-MM-DD}` goes straight to that day and costs one
+ * read, and it is what /events hands back, so a market that bound to the registry
+ * always has it. A bare id falls back to scanning recent days, newest first, and
+ * stops at the first hit.
+ *
+ * The scan window is bounded per sport for a reason that is about money, not
+ * neatness: MMA's monthly quota is 2,500 calls, so an unbounded search would be a
+ * way to drain a month of it with a handful of wrong ids. Days already in cache
+ * cost nothing, which is why the window can be as wide as it is.
+ */
+function sportradarSummaryResolver(lookbackDays: number): SportResolver {
+  return {
+    idFormat: 'a Sportradar event id, optionally with its date — sr:sport_event:74124796 or sr:sport_event:74124796@2026-09-02',
+
+    async events(sport, q) {
+      const date = (q.from ?? new Date().toISOString()).split('T')[0]
+      const { data, fromCache } = await getOrFetch({
+        sport, dataType: 'schedule', qualifier: date,
+        ttl: ttlFor(sport, 'schedule', 3600), params: dateParams(date),
+      })
+      // The registry emits ids carrying their date, so a consumer that binds a
+      // market here can resolve it later in a single read.
+      const events = eventsFromSportradarSummaries(sport, data)
+        .map(e => ({ ...e, event_id: `${e.event_id}@${date}` }))
+      return { events, fromCache, season: currentSeason(sport) }
+    },
+
+    async resolve(sport, eventId) {
+      const [rawId, pinnedDate] = eventId.trim().split('@')
+      if (!/^sr:sport_event:\d+$/.test(rawId)) {
+        return { resolution: null, fromCache: false, cacheKey: '', dataType: '' }
+      }
+
+      const days: string[] = []
+      if (pinnedDate && /^\d{4}-\d{2}-\d{2}$/.test(pinnedDate)) {
+        days.push(pinnedDate)
+      } else {
+        for (let i = 0; i < lookbackDays; i++) {
+          days.push(new Date(Date.now() - i * 86400000).toISOString().split('T')[0])
+        }
+      }
+
+      for (const date of days) {
+        try {
+          const { data, fromCache } = await getOrFetch({
+            sport, dataType: 'scores', qualifier: date,
+            ttl: ttlFor(sport, 'scores', SR_PENDING_TTL), params: dateParams(date),
+          })
+          const found = findSportradarSummary(data, rawId)
+          if (found) {
+            return { resolution: fromSportradarSummary(sport, found), fromCache, cacheKey: '', dataType: 'scores' }
+          }
+        } catch {
+          // A single bad day must not abort the search.
+        }
+      }
+
+      // Searched and did not find it: not-found rather than malformed.
+      return { resolution: null, fromCache: false, cacheKey: '', dataType: 'scores' }
+    },
+  }
+}
+
+export const RESOLVERS: Record<string, SportResolver> = {
+  f1, soccer, dota2, agentfighter,
+
+  // Sportradar. Built from two factories rather than seven literals because the
+  // sports differ only in payload family and, for the unified feed, in how far
+  // back a bare id may be searched.
+  nba:  sportradarGameResolver(),
+  nhl:  sportradarGameResolver(),
+  wnba: sportradarGameResolver(),
+  nfl:  sportradarGameResolver(),
+  mlb:  sportradarGameResolver(),
+
+  // 3 days: tennis runs daily, so a recently-completed match is close by.
+  tennis: sportradarSummaryResolver(3),
+  // 8 days: MMA runs weekly cards, so yesterday is usually empty and the last
+  // card can be a week back. Cached days cost nothing, and the quota here is
+  // 2,500/month, which is exactly why this is bounded at all.
+  mma:    sportradarSummaryResolver(8),
+}
+
+/**
+ * Fails loudly at module load if RESOLVABLE and RESOLVERS disagree.
+ *
+ * The two lists have to be maintained in different files (resolution.ts cannot
+ * import this module without a cycle), and they are read by different callers:
+ * RESOLVABLE is what /events and /resolve advertise as supported, RESOLVERS is
+ * what actually answers. A drift between them is a bad failure — a sport
+ * advertised as settleable that 404s, or one that works but is never mentioned —
+ * and it is silent, because nothing in a request path compares them.
+ *
+ * Checking at import time turns that into a build/boot error instead.
+ */
+function assertResolvableMatchesResolvers(): void {
+  const declared = [...RESOLVABLE].sort().join(',')
+  const actual   = Object.keys(RESOLVERS).sort().join(',')
+  if (declared !== actual) {
+    throw new Error(
+      `resolution.RESOLVABLE and resolve-dispatch.RESOLVERS disagree.
+`
+      + `  RESOLVABLE: ${declared}
+`
+      + `  RESOLVERS:  ${actual}
+`
+      + `Add the sport to both, or remove it from both.`
+    )
+  }
+}
+assertResolvableMatchesResolvers()
 
 export function resolverFor(sport: string): SportResolver | undefined {
   return RESOLVERS[sport]

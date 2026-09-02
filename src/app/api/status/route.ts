@@ -22,7 +22,11 @@ export async function GET() {
 
   return NextResponse.json(
     {
-      service: summary.offline === SPORTS.length ? 'down'
+      // Scoped to entitled sports — see summarise(). Comparing against
+      // SPORTS.length counted the 16 deliberately-unserved registry entries as
+      // faults, which pinned this field at 'degraded' forever and made it
+      // useless as a backoff signal.
+      service: summary.serving === 0 || summary.offline === summary.serving ? 'down'
              : summary.limited + summary.offline > 0 ? 'degraded'
              : 'operational',
       checkedAt: new Date().toISOString(),
@@ -33,6 +37,10 @@ export async function GET() {
         operational: summary.online,
         limited:     summary.limited,
         offline:     summary.offline,
+        /** Sports we undertake to serve. The three counts above sum to this. */
+        serving:     summary.serving,
+        /** Published in the registry but not served. Inventory, not a fault. */
+        registered:  summary.registered,
       },
       // Deliberately qualitative. Quota sizes, utilisation and remaining-call
       // counts describe our capacity and cost structure — they belong on the

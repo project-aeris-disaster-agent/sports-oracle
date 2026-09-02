@@ -119,10 +119,20 @@ export default async function Home() {
 
           <div className="panel grid grid-cols-2 md:grid-cols-4 divide-x divide-[color:var(--edge)]">
             {[
-              ['SPORTS LIVE', String(ENTITLED_SPORTS.length), 'emerald'],
-              ['ENDPOINTS',   String(endpointCount),          'blue'],
-              ['MCP TOOLS',   String(TOOLS.length),           'blue'],
-              ['UPTIME',      '99.9%',                        'emerald'],
+              // Every figure here is DERIVED. Nothing in this row may be a
+              // hand-written constant.
+              //
+              // This used to carry a hardcoded "UPTIME 99.9%". Nothing measured
+              // it: there is no status history, no synthetic prober and no
+              // external monitor, so the number was an assertion the system
+              // could not support and a customer was entitled to ask us to back
+              // up. It is replaced with the live count of sports currently
+              // reporting healthy, which getLiveStatus() actually computes.
+              // Restore an availability figure here only once it is measured.
+              ['SPORTS LIVE',  String(ENTITLED_SPORTS.length), 'emerald'],
+              ['ENDPOINTS',    String(endpointCount),          'blue'],
+              ['MCP TOOLS',    String(TOOLS.length),           'blue'],
+              ['OPERATIONAL',  `${health.online}/${statuses.filter(s => s.entitled).length}`, 'emerald'],
             ].map(([label, value, tone]) => (
               <div key={label} className="px-5 py-4 space-y-1.5">
                 <div className="legend">{label}</div>

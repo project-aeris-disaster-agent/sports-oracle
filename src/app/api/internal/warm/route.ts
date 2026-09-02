@@ -58,10 +58,23 @@ export async function POST(req: NextRequest) {
       continue
     }
 
+    // The qualifier and the upstream request MUST be built from the same params.
+    //
+    // They were not. The qualifier got `{ season, date }` while the fetch got the
+    // full `dateParams(today)`, which also carries `epoch_day`. Soccer keys its
+    // schedule on epoch_day (cache-key.ts), so warming computed the qualifier with
+    // epoch_day UNDEFINED and fell through to the date string: every warm run
+    // wrote `soccer:schedule:2026-09-02` while every real request read
+    // `soccer:schedule:20699`. The entry was never read by anything, so soccer
+    // paid a full cold upstream fetch on every first request despite being warmed
+    // hourly. Building both from one object is what makes that class of drift
+    // impossible rather than merely fixed.
+    const warmParams = { ...dateParams(today), season }
+
     // Warming is a blind pre-fetch with no caller-supplied ids, so anything keyed
     // on a game/team id can't be warmed usefully — the qualifier would be
     // 'missing' and the entry would never be read.
-    const qualifier = qualifierFor(sport, path, { season, date: today })
+    const qualifier = qualifierFor(sport, path, warmParams)
     if (!qualifier || qualifier === 'missing') {
       results[path] = 'skipped (needs a request-specific id)'
       continue
@@ -71,7 +84,6 @@ export async function POST(req: NextRequest) {
     // upstream path template is not. NFL injuries is the live example — the
     // qualifier defaults to week 1, but `{week}` in the path stays unfilled and
     // the fetch throws. Ask the template what it actually needs.
-    const warmParams = { ...dateParams(today), season }
     const picked = resolve(sport, endpoint.dataType)
     if (picked.ok) {
       const missing = missingParams(picked.provider, endpoint.dataType, warmParams, sport)
