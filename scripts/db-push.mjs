@@ -38,6 +38,16 @@ if (!dbUrl) {
   process.exit(1)
 }
 
+// The transaction pooler (port 6543) runs PgBouncer in transaction mode, which
+// does not support named prepared statements. The CLI's pgx driver caches them
+// by default and fails with `prepared statement "..." already exists` (42P05)
+// on the second migration. pgx honours this URL parameter to use the simple
+// query protocol instead, which is what makes pushing through 6543 work at all.
+// Verified 2026-09-03: migrations 012 and 013 applied through it.
+if (!/default_query_exec_mode=/.test(dbUrl)) {
+  dbUrl += (dbUrl.includes('?') ? '&' : '?') + 'default_query_exec_mode=simple_protocol'
+}
+
 const passthrough = process.argv.slice(2)
 const args = ['db', 'push', '--db-url', dbUrl, ...passthrough]
 
