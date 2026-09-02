@@ -16,6 +16,7 @@ import { gateway }                   from '@/middleware/gateway'
 import { logRequest }                from '@/lib/serve'
 import { isOpenAndFree }             from '@/lib/providers'
 import { RESOLVABLE }                from '@/lib/resolution'
+import { finalityFor }               from '@/lib/capabilities'
 import { resolverFor, resolveEvent } from '@/lib/resolve-dispatch'
 
 const TTL_OFFICIAL = 2592000  // 30 days — immutable once official
@@ -99,6 +100,7 @@ export async function GET(
           // cannot miss it. Acting on a provisional result is the failure mode
           // this whole surface exists to prevent.
           settleable: resolution.official,
+          finality:   finalityFor(sport) ?? null,
           note: resolution.official
             ? (resolution.void_reason
                 ? `Void (${resolution.void_reason}) — no result. Safe to settle as void.`

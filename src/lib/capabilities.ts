@@ -73,6 +73,73 @@ export interface SportSpec {
 // as "error", which is the opposite of the intended "integrating soon" narrative,
 // and it stays out of the red/amber/green indicator set so those keep single
 // meanings (live / degraded / error).
+// ─── Finality policy ──────────────────────────────────────────────────────────
+// How, and how fast, a result becomes `official` for each settleable sport.
+// Published in the manifest and on every /resolve response so a market can set
+// its settlement timeout from a stated rule rather than an email.
+//
+// `edgeLagSeconds` is measured, not assumed: every Sportradar document probed on
+// 2026-09-02 came through CloudFront with max-age=601, so a status change can
+// take up to ten minutes to reach us on top of whatever the league takes.
+export type FinalityRule =
+  | 'upstream_state'   // the upstream publishes a distinct final state; we mirror it
+  | 'upstream_gated'   // the upstream only publishes once the governing body has
+  | 'ageing_window'    // our own hold: official once unchanged for windowSeconds
+  | 'explicit_flag'    // the upstream sends an explicit final/void/provisional flag
+
+export interface FinalityPolicy {
+  rule:            FinalityRule
+  /** Our hold, where rule is ageing_window. */
+  windowSeconds?:  number
+  /** Upstream edge-cache lag we cannot beat. */
+  edgeLagSeconds?: number
+  /** Days after official during which the settlement-watch job keeps re-checking. */
+  revisionWatchDays: number
+  description:     string
+}
+
+const SPORTRADAR_FINALITY: FinalityPolicy = {
+  rule: 'upstream_state', edgeLagSeconds: 601, revisionWatchDays: 3,
+  description: 'Sportradar publishes `complete` (played, statistics unreviewed) and `closed` '
+             + '(statistics final) as separate states. Only `closed` reports official; `complete` '
+             + 'is held at provisional. Typically minutes after the final whistle, plus up to ten '
+             + 'minutes of upstream edge caching.',
+}
+
+export const FINALITY: Record<string, FinalityPolicy> = {
+  nba: SPORTRADAR_FINALITY, nhl: SPORTRADAR_FINALITY, wnba: SPORTRADAR_FINALITY,
+  nfl: SPORTRADAR_FINALITY, mlb: SPORTRADAR_FINALITY, tennis: SPORTRADAR_FINALITY, mma: SPORTRADAR_FINALITY,
+  soccer: {
+    rule: 'upstream_state', revisionWatchDays: 3,
+    description: 'Official the moment TxLINE emits the game_finalised marker (StatusId 100) in the '
+               + 'score stream, typically seconds to minutes after full time. Unconfirmed events '
+               + '(VAR-revocable) are ignored until confirmed. The settled sequence number is '
+               + 'returned as settled_seq for Merkle verification.',
+  },
+  f1: {
+    rule: 'upstream_gated', revisionWatchDays: 30,
+    description: 'Jolpica publishes a classification only once the FIA has made it official, after '
+               + 'scrutineering and stewards decisions, usually one to three hours after the flag. '
+               + 'The FIA can still revise a classification on appeal, which is why this sport has '
+               + 'the longest revision watch.',
+  },
+  dota2: {
+    rule: 'ageing_window', windowSeconds: 6 * 3600, revisionWatchDays: 3,
+    description: 'A completed match is held at provisional for six hours after it ends, because '
+               + 'OpenDota cannot distinguish a first replay parse from a settled one and technical '
+               + 'remakes exist. This is our rule, not an upstream signal.',
+  },
+  agentfighter: {
+    rule: 'explicit_flag', revisionWatchDays: 3,
+    description: 'The operator publishes an explicit settlement field (final, void, provisional) '
+               + 'and we mirror it directly. Effectively immediate on final.',
+  },
+}
+
+export function finalityFor(sport: string): FinalityPolicy | undefined {
+  return FINALITY[sport]
+}
+
 export const STATUS_META: Record<SportStatus, { label: string; dot: string; text: string; ring: string }> = {
   online:  { label: 'OPERATIONAL', dot: 'bg-emerald-400',              text: 'text-emerald-400',            ring: 'shadow-[0_0_8px_rgba(52,211,153,0.9)]' },
   limited: { label: 'LIMITED',     dot: 'bg-amber-400',                text: 'text-amber-400',              ring: 'shadow-[0_0_8px_rgba(251,191,36,0.9)]' },
@@ -284,7 +351,11 @@ const DECLARED: SportDecl[] = [
     key: 'mma', label: 'MMA', entitled: true, status: 'limited', statusNote: 'Event-based coverage — fight weeks only', capacity: 'low', teamBased: false, season: '2026',
     note: 'Individual sport. Events are scheduled in weekly cards.',
     endpoints: [
-      { path: 'schedule', dataType: 'schedule', params: ['date?'], ttl: TTL.scores,
+      // 6h, matching /scores below. This was TTL.scores (1h), which meant the
+      // hourly warm job re-fetched a weekly fight card 24 times a day: 448 of
+      // MMA's 2,500 monthly calls went on warming alone in August 2026, with no
+      // client traffic behind them. A card does not change hourly.
+      { path: 'schedule', dataType: 'schedule', params: ['date?'], ttl: 21600,
         desc: 'Event summaries for a date', signal: 'Fight card slate.' },
       // 6h — MMA runs weekly cards, so a results document is static almost all
       // of the time and the monthly quota here is only 2,500 calls.

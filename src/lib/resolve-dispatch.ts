@@ -335,7 +335,13 @@ const agentfighter: SportResolver = {
  * `scheduled`. The registry and the settlement read are different jobs against
  * the same document, so they get different lifetimes.
  */
-const SR_PENDING_TTL = 300
+//
+// 600 and not lower for a measured reason: Sportradar serves through CloudFront
+// with `Cache-Control: max-age=601` on every document probed on 2026-09-02, so
+// a re-fetch inside ten minutes returns the same edge copy and spends quota on
+// nothing. This is also the floor on how fast a `closed` status can reach us,
+// and it is published as such in the sport's finality policy.
+const SR_PENDING_TTL = 600
 
 /** Season-registry TTL. Matches the manifest's schedule TTL intent. */
 const SR_EVENTS_TTL = 86400
@@ -379,7 +385,7 @@ function sportradarGameResolver(): SportResolver {
       // the results document. Read under the short pending TTL — see above.
       const { data: schedule, fromCache } = await getOrFetch({
         sport, dataType: 'schedule', qualifier: season,
-        ttl: SR_PENDING_TTL, params: { season },
+        ttl: SR_PENDING_TTL, params: { season }, priority: true,
       })
 
       const game = findSportradarGame(schedule, id)
@@ -406,7 +412,7 @@ function sportradarGameResolver(): SportResolver {
       try {
         const { data: daily } = await getOrFetch({
           sport, dataType: 'scores', qualifier: date,
-          ttl: ttlFor(sport, 'scores', SR_PENDING_TTL), params: dateParams(date),
+          ttl: ttlFor(sport, 'scores', SR_PENDING_TTL), params: dateParams(date), priority: true,
         })
         const scored = findSportradarGame(daily, id)
         if (scored) {
@@ -477,7 +483,7 @@ function sportradarSummaryResolver(lookbackDays: number): SportResolver {
         try {
           const { data, fromCache } = await getOrFetch({
             sport, dataType: 'scores', qualifier: date,
-            ttl: ttlFor(sport, 'scores', SR_PENDING_TTL), params: dateParams(date),
+            ttl: ttlFor(sport, 'scores', SR_PENDING_TTL), params: dateParams(date), priority: true,
           })
           const found = findSportradarSummary(data, rawId)
           if (found) {

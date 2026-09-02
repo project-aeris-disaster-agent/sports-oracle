@@ -32,9 +32,65 @@ export interface LiveSportStatus {
 // usage — callers should know to poll it conservatively before they exhaust it.
 const LOW_HEADROOM = 5000
 
+interface HealthRow {
+  sport: string; calls: number; failures: number
+  last_ok_at: string | null; last_fail_at: string | null
+  last_status: number | null; last_error: string | null
+}
+
+interface SubscriptionRow {
+  provider: string; expires_at: string | null
+}
+
+/** Days of warning before a provider subscription lapses. */
+const SUBSCRIPTION_WARN_DAYS = 3
+
+/**
+ * Upstream health and subscription state, applied on top of the budget-derived
+ * status. Both can only LOWER a status, never raise it, so a sport declared
+ * `limited` for an unrelated reason stays at least that.
+ *
+ * Why this exists: status was previously a function of quota and entitlement
+ * only. TxLINE is unmetered and always entitled, so when its API token expired
+ * on 2026-08-18 every soccer call returned 403 for two weeks while this module
+ * reported "All endpoints operational" the entire time. A customer found it.
+ */
+function applyUpstreamState(
+  status: SportStatus, statusNote: string,
+  health: HealthRow | undefined, sub: SubscriptionRow | undefined
+): { status: SportStatus; statusNote: string } {
+  const lower = (to: SportStatus, note: string) =>
+    STATUS_RANK[to] < STATUS_RANK[status] ? { status: to, statusNote: note } : { status, statusNote }
+
+  // Subscription lapse is knowable in advance; say so before it happens.
+  if (sub?.expires_at) {
+    const msLeft = new Date(sub.expires_at).getTime() - Date.now()
+    if (msLeft <= 0) return lower('offline', 'Upstream subscription expired — renewal required')
+    if (msLeft < SUBSCRIPTION_WARN_DAYS * 86400000) {
+      const r = lower('limited', `Upstream subscription expires in ${Math.ceil(msLeft / 86400000)}d`)
+      status = r.status; statusNote = r.statusNote
+    }
+  }
+
+  if (!health || health.calls === 0 || health.failures === 0) return { status, statusNote }
+
+  const allFailing = health.last_ok_at === null && health.calls >= 2
+  if (allFailing) {
+    // 401/403 is an operator problem (credentials, entitlement), not a blip.
+    // Naming it as such is the difference between "retry later" and "act now".
+    const auth = health.last_status === 401 || health.last_status === 403
+    return lower('offline', auth
+      ? 'Upstream rejected our credentials — real-time data unavailable'
+      : 'Upstream not responding — serving cached data only')
+  }
+  return lower('limited', 'Intermittent upstream errors — recent data may be delayed')
+}
+
 function derive(
   spec: SportSpec,
-  row: { calls_made: number; calls_limit: number; cache_only: boolean; entitled: boolean | null; last_call_at: string | null }
+  row: { calls_made: number; calls_limit: number; cache_only: boolean; entitled: boolean | null; last_call_at: string | null },
+  health?: HealthRow,
+  sub?: SubscriptionRow
 ): LiveSportStatus {
   const callsMade  = row.calls_made ?? 0
   const callsLimit = row.calls_limit ?? 0
@@ -80,6 +136,16 @@ function derive(
     statusNote = spec.statusNote
   }
 
+  // Applied AFTER the ceiling clamp on purpose: the clamp stops budget health
+  // from promoting a sport, whereas upstream failure must be allowed to demote
+  // one below its declared status. An 'online' declaration is a statement about
+  // integration completeness, not a promise that the upstream is up right now.
+  if (entitled) {
+    const adjusted = applyUpstreamState(status, statusNote, health, sub)
+    status     = adjusted.status
+    statusNote = adjusted.statusNote
+  }
+
   return { key: spec.key, status, statusNote, entitled, callsMade, callsLimit, pctUsed, remaining,
            cacheOnly: !!row.cache_only, lastCallAt: row.last_call_at, live: true }
 }
@@ -100,13 +166,42 @@ export async function getLiveStatus(): Promise<LiveSportStatus[]> {
 
   try {
     const supabase = createClient(url, key)
-    const { data, error } = await supabase.from('budget_status').select('*')
-    if (error || !data) return SPORTS.map(fallback)
+    const [budget, health, subs, proj] = await Promise.all([
+      supabase.from('budget_status').select('*'),
+      supabase.rpc('upstream_health_summary', { p_minutes: 30 }),
+      supabase.from('provider_subscriptions').select('provider, expires_at'),
+      supabase.from('quota_projection').select('sport, projected_pct, day_of_month'),
+    ])
+    if (budget.error || !budget.data) return SPORTS.map(fallback)
 
-    const byKey = new Map(data.map(r => [r.sport, r]))
+    const byKey     = new Map(budget.data.map(r => [r.sport, r]))
+    const healthBy  = new Map<string, HealthRow>(((health.data ?? []) as HealthRow[]).map(h => [h.sport, h]))
+    const subBy     = new Map<string, SubscriptionRow>(((subs.data ?? []) as SubscriptionRow[]).map(x => [x.provider, x]))
+
+    // An unmetered sport has no budget row. It used to fall back to its declared
+    // status, which is how soccer stayed "online" through a two-week outage —
+    // there was no path by which it could be degraded. A zero row lets it go
+    // through the same health checks as everything else.
+    const ZERO = { calls_made: 0, calls_limit: 0, cache_only: false, entitled: null, last_call_at: null }
+
+    const projBy = new Map<string, number>(
+      ((proj.data ?? []) as { sport: string; projected_pct: number | null; day_of_month: number }[])
+        // A projection from the first two days of a month is noise, not a trend.
+        .filter(p => p.day_of_month >= 3 && p.projected_pct != null)
+        .map(p => [p.sport, Number(p.projected_pct)])
+    )
+
     return SPORTS.map(spec => {
-      const row = byKey.get(spec.key)
-      return row ? derive(spec, row) : fallback(spec)
+      const row       = byKey.get(spec.key) ?? ZERO
+      const defaultId = spec.sources.find(s => s.isDefault)?.id
+      const derived   = derive(spec, row, healthBy.get(spec.key), defaultId ? subBy.get(defaultId) : undefined)
+      // On pace to exhaust the month: degrade now, while there is still a month
+      // left to do something about it. Qualitative in the note, as always.
+      const projected = projBy.get(spec.key)
+      if (derived.entitled && projected !== undefined && projected >= 100 && derived.status === 'online') {
+        return { ...derived, status: 'limited', statusNote: 'High demand — real-time may be throttled later this month' }
+      }
+      return derived
     })
   } catch {
     // Never let a status lookup take the page down.

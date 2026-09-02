@@ -28,6 +28,12 @@ export interface FetchOptions {
   params?:  Record<string, string>
   /** Explicit `?provider=` selection. Omitted means the sport's default. */
   provider?: string | null
+  /**
+   * Settlement read. May draw on the final 10% of a sport's monthly quota,
+   * which pricing reads are held back from. A market that cannot price is a
+   * missed opportunity; a market that cannot settle is a liability.
+   */
+  priority?: boolean
 }
 
 export interface UpstreamResult {
@@ -43,8 +49,8 @@ export interface UpstreamResult {
 // Quotas are provisioned per sport, not as one shared pool
 // (tennis 300k, nhl 235k, mlb 225k, nba 110k, nfl 100k, wnba 55k, mma 2.5k).
 
-async function canCall(sport: string): Promise<boolean> {
-  const { data, error } = await supabase.rpc('check_budget', { p_sport: sport })
+async function canCall(sport: string, priority = false): Promise<boolean> {
+  const { data, error } = await supabase.rpc('check_budget', { p_sport: sport, p_allow_reserve: priority })
   if (error) {
     console.error('[upstream] budget check failed:', error.message)
     return false  // fail safe — never spend when we can't verify headroom
@@ -61,10 +67,30 @@ async function incrementBudget(sport: string): Promise<boolean> {
   return data === true
 }
 
+// ─── Upstream health ──────────────────────────────────────────────────────────
+// Every upstream outcome, success or failure, is recorded. This is the signal
+// status.ts was missing: it derived health from quota and entitlement alone, and
+// an unmetered provider has neither, so TxLINE's expired API token left soccer
+// advertised as "online" for two weeks while every call returned 403.
+//
+// Fire-and-forget by design. A health write must never add latency to, or fail,
+// the request it is observing.
+function recordHealth(
+  provider: ProviderId, sport: string, dataType: string,
+  ok: boolean, status: number | null, latencyMs: number, error: string | null
+): void {
+  supabase.rpc('record_upstream_health', {
+    p_provider: provider, p_sport: sport, p_data_type: dataType,
+    p_ok: ok, p_status: status, p_latency_ms: latencyMs, p_error: error,
+  }).then(({ error: e }) => {
+    if (e) console.error('[upstream] health record failed:', e.message)
+  })
+}
+
 // ─── Fetch ────────────────────────────────────────────────────────────────────
 
 export async function fetchUpstream(options: FetchOptions): Promise<UpstreamResult> {
-  const { sport, dataType, params = {}, provider: preferred } = options
+  const { sport, dataType, params = {}, provider: preferred, priority = false } = options
 
   const picked = resolve(sport, dataType, preferred)
   if (!picked.ok) {
@@ -98,7 +124,7 @@ export async function fetchUpstream(options: FetchOptions): Promise<UpstreamResu
     )
   }
 
-  if (provider.metered && !(await canCall(sport))) {
+  if (provider.metered && !(await canCall(sport, priority))) {
     throw new UpstreamError(
       `Monthly ${sport.toUpperCase()} quota exhausted or in cache-only mode`,
       429, sport, dataType, provider.id
@@ -130,16 +156,12 @@ export async function fetchUpstream(options: FetchOptions): Promise<UpstreamResu
       headers: { 'Accept': 'application/json', ...(auth?.headers ?? {}) },
     })
   } catch (err) {
-    if ((err as Error).name === 'AbortError') {
-      throw new UpstreamError(
-        `Upstream request timed out after 7s (${sport}/${dataType} via ${provider.label})`,
-        504, sport, dataType, provider.id
-      )
-    }
-    throw new UpstreamError(
-      `Upstream fetch failed: ${(err as Error).message}`,
-      502, sport, dataType, provider.id
-    )
+    const timedOut = (err as Error).name === 'AbortError'
+    const message  = timedOut
+      ? `Upstream request timed out after 7s (${sport}/${dataType} via ${provider.label})`
+      : `Upstream fetch failed: ${(err as Error).message}`
+    recordHealth(provider.id, sport, dataType, false, null, Date.now() - start, message)
+    throw new UpstreamError(message, timedOut ? 504 : 502, sport, dataType, provider.id)
   } finally {
     clearTimeout(timeout)
   }
@@ -150,11 +172,16 @@ export async function fetchUpstream(options: FetchOptions): Promise<UpstreamResu
     if (response.status === 429) {
       console.warn(`[upstream] rate limited on ${sport}/${dataType} via ${provider.label}`)
     }
-    throw new UpstreamError(
-      `Upstream returned ${response.status} for ${sport}/${dataType} via ${provider.label}`,
-      response.status, sport, dataType, provider.id
-    )
+    // The body is the most useful thing here: TxLINE says "API Token is invalid
+    // or expired" in it, which is the difference between "retry later" and "an
+    // operator has to act". Bounded so a stray HTML error page cannot bloat a row.
+    const body = await response.text().catch(() => '')
+    const message = `Upstream returned ${response.status} for ${sport}/${dataType} via ${provider.label}`
+    recordHealth(provider.id, sport, dataType, false, response.status, fetchMs, body.slice(0, 200) || message)
+    throw new UpstreamError(message, response.status, sport, dataType, provider.id)
   }
+
+  recordHealth(provider.id, sport, dataType, true, response.status, fetchMs, null)
 
   let data: Record<string, unknown>
   try {

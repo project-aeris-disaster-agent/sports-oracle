@@ -307,15 +307,17 @@ export async function getOrFetch(opts: {
   qualifier: string
   ttl:       number
   params:    Record<string, string>
+  /** Settlement read: may spend the quota reserve. See FetchOptions.priority. */
+  priority?: boolean
 }): Promise<{ data: Record<string, unknown>; cacheKey: string; fromCache: boolean }> {
-  const { sport, dataType, qualifier, ttl, params } = opts
+  const { sport, dataType, qualifier, ttl, params, priority } = opts
   const cacheKey = `${sport}:${dataType}:${qualifier}`
 
   const { data: cached, error } = await supabase.rpc('get_cached', { p_cache_key: cacheKey })
   if (error) console.error(`[${dataType}] cache lookup:`, error.message)
   if (cached) return { data: cached as Record<string, unknown>, cacheKey, fromCache: true }
 
-  const result = await fetchAndCache({ sport, dataType, params }, cacheKey, ttl)
+  const result = await fetchAndCache({ sport, dataType, params, priority }, cacheKey, ttl)
   return { data: result.data, cacheKey, fromCache: false }
 }
 

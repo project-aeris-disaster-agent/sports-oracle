@@ -10,7 +10,7 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { gateway }                   from '@/middleware/gateway'
-import { getSport, SPORTS, endpointSource } from '@/lib/capabilities'
+import { getSport, SPORTS, endpointSource, finalityFor } from '@/lib/capabilities'
 
 export async function GET(
   req: NextRequest,
@@ -58,6 +58,10 @@ export async function GET(
     // on this data needs to know where it comes from and whether it can settle a
     // market — not just what the endpoint is called.
     sources:    spec.sources,
+    // How a result becomes official here, and how long we keep re-checking it
+    // afterwards. Absent for sports with no settlement surface. A market engine
+    // should derive its settlement timeout from this, not from a policy email.
+    finality:   finalityFor(spec.key) ?? null,
     // Selectable upstreams. Pass ?provider=<id> on any endpoint below to route
     // there instead of the default. Offline entries are listed on purpose: a
     // router should publish what it could route to, not just what it does today.
