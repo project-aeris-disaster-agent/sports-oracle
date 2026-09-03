@@ -226,8 +226,20 @@ export async function POST(req: NextRequest) {
     const eventName = webhookEvent(r, revised)
     if (!eventName || !subs.length) return
 
-    for (const sub of subs.filter(s => s.events.includes(eventName.split('.')[1]))) {
-      if (report.delivered + report.failed >= MAX_DELIVER || timeLeft() < 1500) { report.stoppedEarly = true; return }
+    const targets = subs.filter(s => s.events.includes(eventName.split('.')[1]))
+    for (let i = 0; i < targets.length; i++) {
+      const sub = targets[i]
+      if (report.delivered + report.failed >= MAX_DELIVER || timeLeft() < 1500) {
+        // Out of budget with deliveries still owed. Record each as a deferred
+        // attempt 0 so the retry queue owns them from here: without a row the
+        // queue has nothing to retry, and the notification is silently lost.
+        // That happened in production on the first Dota 2 official flip.
+        report.stoppedEarly = true
+        await supabase.from('webhook_deliveries').insert(
+          targets.slice(i).map(t => ({ subscription_id: t.id, observation_id: obsId as number, attempt: 0, status: null, error: 'deferred: run time budget exhausted' }))
+        )
+        return
+      }
       const ok = await deliver(sub, {
         id: obsId as number, sport, event_id: eventId, status: r.status, official: r.official,
         revised, resolution: r, observed_at: row?.observed_at ?? new Date().toISOString(),
