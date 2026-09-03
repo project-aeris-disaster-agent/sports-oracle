@@ -67,10 +67,16 @@ const NEW_EVENT_LOOKBACK_MS = 36 * 3600 * 1000
 
 /** Which observation transitions produce a webhook, and the event name sent. */
 function webhookEvent(r: Resolution, revised: boolean): string | null {
-  if (revised)               return 'settlement.revised'
-  if (r.status === 'void')   return 'settlement.void'
-  if (r.official)            return 'settlement.official'
-  return null  // scheduled/live/provisional transitions are logged, not pushed
+  if (revised)                    return 'settlement.revised'
+  if (r.status === 'void')        return 'settlement.void'
+  if (r.official)                 return 'settlement.official'
+  // Opt-in only: a subscription has to list `provisional` to receive these.
+  // /api/auth/webhooks has offered that option since it shipped, but this
+  // function never emitted it, so opting in did nothing. A market that wants
+  // to freeze trading the moment an outcome is known, before it is official,
+  // is exactly who asks for it.
+  if (r.status === 'provisional') return 'settlement.provisional'
+  return null  // scheduled/live transitions are logged, not pushed
 }
 
 /** Stable digest of the parts of a resolution that constitute the outcome. */
@@ -235,7 +241,7 @@ export async function POST(req: NextRequest) {
     obs: { id: number; sport: string; event_id: string; status: string; official: boolean; revised: boolean; resolution: unknown; observed_at: string },
     attempt: number
   ): Promise<boolean> {
-    const eventName = obs.revised ? 'settlement.revised' : obs.status === 'void' ? 'settlement.void' : obs.official ? 'settlement.official' : 'settlement.update'
+    const eventName = obs.revised ? 'settlement.revised' : obs.status === 'void' ? 'settlement.void' : obs.official ? 'settlement.official' : obs.status === 'provisional' ? 'settlement.provisional' : 'settlement.update'
     const payload = JSON.stringify({
       event:          eventName,
       observation_id: obs.id,
