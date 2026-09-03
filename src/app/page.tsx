@@ -77,6 +77,7 @@ export default async function Home() {
           </Link>
           <nav className="hidden md:flex items-center gap-6 ml-6 text-[12px] text-[color:var(--text-dim)]">
             <a href="#sports" className="hover:text-white transition-colors">Sports</a>
+            <a href="#settle" className="hover:text-white transition-colors">Settlement</a>
             <a href="#agents" className="hover:text-white transition-colors">For agents</a>
             <a href="#access" className="hover:text-white transition-colors">Access</a>
             <a href="#token" className="hover:text-white transition-colors">$DARE</a>
@@ -105,8 +106,9 @@ export default async function Home() {
               <span className="text-[color:var(--blue-bright)]">autonomous agents</span>.
             </h1>
             <p className="text-[15px] leading-relaxed text-[color:var(--text-dim)] max-w-xl">
-              One key. REST and MCP. Low-latency coverage across every major league,
-              designed for systems that never stop asking.
+              Bind a market to an event, price it while it runs, settle it on an
+              official result, and get told when that result lands. One key, REST and
+              MCP, eleven sports through a single settlement contract.
             </p>
           </div>
 
@@ -146,7 +148,10 @@ export default async function Home() {
           </div>
 
           <Code>{`curl -H "X-Oracle-Key: sk_live_..." \\
-  "${PROD_URL}/api/v1/nba/injuries"`}</Code>
+  "${PROD_URL}/api/v1/mlb/resolve?event_id=0c111c2d-64b5-40bf-8920-16496726d80e"
+
+{ "resolution": { "status": "official", "winner": "Cincinnati Reds", ... },
+  "meta": { "settleable": true, "finality": { "rule": "upstream_state", ... } } }`}</Code>
         </section>
 
         {/* ─── Sports panel (main event) ──────────────────────────────────── */}
@@ -154,12 +159,96 @@ export default async function Home() {
           id="sports"
           legend="COVERAGE"
           title="All markets"
-          kicker="Sports, esports and — soon — politics. Every market exposes its own endpoint set. Expand a row to see endpoints, parameters and tier requirements."
+          kicker="Every sport exposes its own endpoint set, and every sport marked SETTLES answers /events, /resolve and /settlements with the same contract. Expand a row to see endpoints, parameters and tier requirements."
         >
           <SportsPanel
             states={statuses.map(s => ({ key: s.key, status: s.status, statusNote: s.statusNote }))}
             live={health.live}
           />
+        </Section>
+
+        {/* ─── Settlement ─────────────────────────────────────────────────── */}
+        <Section
+          id="settle"
+          legend="SETTLEMENT"
+          title="A market's whole life in four calls"
+          kicker="One normalised contract across every sport, an explicit settleable flag on every answer, and a stated rule for how each sport's results become official."
+        >
+          <div className="grid md:grid-cols-2 gap-4">
+            <div className="panel p-5 space-y-3">
+              <div className="legend">1 · BIND</div>
+              <h3 className="display text-[14px] text-white">Open a market against a stable id</h3>
+              <Code>{`GET /api/v1/{sport}/events
+
+{ "events": [ { "event_id": "sr:sport_event:73992512@2026-09-03",
+                "name": "Svitolina, Elina vs Joint, Maya",
+                "scheduled_at": "2026-09-03T00:10:00Z" } ] }`}</Code>
+              <p className="text-[12px] leading-relaxed text-[color:var(--text-dim)]">
+                Ids are stable before the event. Tennis and MMA ids carry their date, so a later
+                resolve is a single read.
+              </p>
+            </div>
+
+            <div className="panel p-5 space-y-3">
+              <div className="legend">2 · PRICE</div>
+              <h3 className="display text-[14px] text-white">Reprice on the signals</h3>
+              <Code>{`GET /api/v1/nba/injuries?limit=3
+GET /api/v1/nfl/depth-chart?week=1
+GET /api/v1/tennis/live
+GET /api/v1/soccer/odds?fixture_id=17615111
+GET /api/v1/nba/changes          # what moved today`}</Code>
+              <p className="text-[12px] leading-relaxed text-[color:var(--text-dim)]">
+                Live state, play-by-play, injuries, depth charts, transactions, odds. Trim the
+                heavy documents with <code className="mono">?fields=</code> and <code className="mono">?limit=</code>.
+              </p>
+            </div>
+
+            <div className="panel p-5 space-y-3">
+              <div className="legend">3 · SETTLE</div>
+              <h3 className="display text-[14px] text-white">Act only when settleable is true</h3>
+              <Code>{`GET /api/v1/{sport}/resolve?event_id=...
+
+{ "resolution": { "status": "official", "official": true,
+                  "winner": "Cincinnati Reds",
+                  "source": "sportradar", "authoritative": true },
+  "meta": { "settleable": true,
+            "finality": { "rule": "upstream_state",
+                          "edgeLagSeconds": 601,
+                          "revisionWatchDays": 3 } } }`}</Code>
+              <p className="text-[12px] leading-relaxed text-[color:var(--text-dim)]">
+                A result that is played but not yet final reports <code className="mono">provisional</code> and
+                <code className="mono"> settleable: false</code>. The finality block says how, and how fast,
+                this sport goes official. Never settle on anything else.
+              </p>
+            </div>
+
+            <div className="panel p-5 space-y-3">
+              <div className="legend">4 · WATCH</div>
+              <h3 className="display text-[14px] text-white">One cursor per slate, or push</h3>
+              <Code>{`GET /api/v1/{sport}/settlements?since=<next_since>
+
+{ "count": 3, "next_since": "2026-09-02T23:57:14Z",
+  "transitions": [ { "event_id": "...", "from": null,
+                     "to": "official", "settleable": true } ] }
+
+POST /api/auth/webhooks   { "url": "https://...", "events": ["official","void","revised"] }
+→ signed POSTs, X-Oracle-Signature: sha256=<hmac of body>`}</Code>
+              <p className="text-[12px] leading-relaxed text-[color:var(--text-dim)]">
+                Only transitions are returned, so a quiet slate costs one call. Add
+                <code className="mono"> ?revised=true</code> for any outcome that changed after it was official.
+                Webhooks retry, and every settlement transition is logged, so revisions are a query.
+              </p>
+            </div>
+          </div>
+
+          <div className="panel p-5 space-y-2">
+            <h3 className="display text-[14px] text-white">Know when not to trust it</h3>
+            <p className="text-[12px] leading-relaxed text-[color:var(--text-dim)] max-w-3xl">
+              <code className="mono">GET /api/status</code> needs no key. It reports each sport as
+              operational, limited or offline with the reason, from measured upstream health rather than
+              a declared value. A rejected upstream credential shows up here within minutes, by name.
+            </p>
+          </div>
         </Section>
 
         {/* ─── Agents ─────────────────────────────────────────────────────── */}
@@ -229,12 +318,14 @@ X-Oracle-Key: sk_live_...
             <h3 className="display text-[14px] text-white">
               Example — &ldquo;who is questionable for tonight&rsquo;s game?&rdquo;
             </h3>
-            <Code>{`1. get_teams(sport="nba")             resolve name -> team_id
-2. get_scores(sport="nba")            today's slate -> game_id
-3. get_injuries(sport="nba")          filter to that team_id
-4. get_pbp(sport="nba", game_id=..)   once play begins`}</Code>
+            <Code>{`1. get_events(sport="nba")                     today's slate -> event_id
+2. get_injuries(sport="nba")                   who is questionable
+3. get_pbp(sport="nba", game_id=..)            once play begins
+4. get_resolve(sport="nba", event_id=..)       settle when meta.settleable is true
+5. get_settlements(sport="nba", since=..)      or watch the whole slate from a cursor`}</Code>
             <p className="text-[12px] leading-relaxed text-[color:var(--text-dim)]">
-              Four calls, typically well under a second end to end.
+              Each call typically returns in about a second from cache; settlement reads go to
+              origin. Every tool description states its tier gate and its upstream source.
             </p>
           </div>
         </Section>

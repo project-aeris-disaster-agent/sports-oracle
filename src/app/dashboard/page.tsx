@@ -488,11 +488,43 @@ function DashboardInner() {
 
         {/* ── Quick start ───────────────────────────────────────────────── */}
         <Panel legend="NEXT" title="Use your key">
-          <pre className="code p-4 text-[color:var(--text-dim)]">{`curl -H "X-Oracle-Key: sk_live_..." \\
-  "${PROD_URL}/api/v1/nba/injuries"`}</pre>
-          <Link href="/#sports" className="btn-ghost inline-block rounded-md px-4 py-2 text-[12px]">
-            Browse all endpoints
-          </Link>
+          <p className="text-[12px] leading-relaxed text-[color:var(--text-dim)]">
+            Every request carries the key in the <code className="mono">X-Oracle-Key</code> header.
+            A market's life is four calls: bind, price, settle, watch.
+          </p>
+          <pre className="code p-4 text-[color:var(--text-dim)]">{`# 1. What can this key reach? Endpoints, tier gates, finality policy.
+curl -H "X-Oracle-Key: sk_live_..." "${PROD_URL}/api/v1/mlb"
+
+# 2. Bind: stable event ids for a slate.
+curl -H "X-Oracle-Key: sk_live_..." "${PROD_URL}/api/v1/mlb/events?from=2026-09-05&to=2026-09-06"
+
+# 3. Settle: act only when meta.settleable is true.
+curl -H "X-Oracle-Key: sk_live_..." "${PROD_URL}/api/v1/mlb/resolve?event_id=<event_id>"
+
+# 4. Watch: only what changed since your cursor, one call per cycle.
+curl -H "X-Oracle-Key: sk_live_..." "${PROD_URL}/api/v1/mlb/settlements?since=<next_since>"
+
+# Health, no key needed.
+curl "${PROD_URL}/api/status"`}</pre>
+          <p className="text-[12px] leading-relaxed text-[color:var(--text-dim)]">
+            Prefer push? Register a webhook with your signed-in session and receive HMAC-signed
+            <code className="mono"> settlement.official</code>, <code className="mono">void</code> and
+            <code className="mono"> revised</code> events with retries:
+          </p>
+          <pre className="code p-4 text-[color:var(--text-dim)]">{`POST ${PROD_URL}/api/auth/webhooks
+Authorization: Bearer <privy session token>
+{ "url": "https://your-host/oracle", "sports": ["mlb","nfl"], "events": ["official","void","revised"] }
+
+# response carries the signing secret once; verify each delivery with
+# HMAC-SHA256(secret, raw body) == X-Oracle-Signature`}</pre>
+          <div className="flex flex-wrap gap-2">
+            <Link href="/#settle" className="btn-ghost inline-block rounded-md px-4 py-2 text-[12px]">
+              How settlement works
+            </Link>
+            <Link href="/#sports" className="btn-ghost inline-block rounded-md px-4 py-2 text-[12px]">
+              Browse all endpoints
+            </Link>
+          </div>
         </Panel>
       </main>
     </>
