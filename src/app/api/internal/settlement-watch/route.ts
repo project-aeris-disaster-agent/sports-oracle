@@ -145,8 +145,23 @@ export async function POST(req: NextRequest) {
   // ── 3. Discover events that recently ended and have never been observed. ──
   if (!report.stoppedEarly && timeLeft() > 2500) {
     try {
-      const { events } = await resolver.events(sport, {})
-      const now = Date.now()
+      // Two registry reads, merged. A season schedule answers both identically
+      // (the second is a cache hit), but the windowed registries do not: TxLINE
+      // returns fixtures starting AT OR AFTER the anchor day, and the tennis and
+      // MMA documents are one calendar day each. Anchored on "now" alone, none of
+      // them can contain a fixture that finished yesterday, so discovery for
+      // those sports found nothing, permanently, on its very first production
+      // run. Anchoring a second read at the lookback boundary is what makes
+      // recently-finished events visible.
+      const now  = Date.now()
+      const from = new Date(now - NEW_EVENT_LOOKBACK_MS).toISOString()
+      const [current, earlier] = await Promise.all([
+        resolver.events(sport, {}),
+        resolver.events(sport, { from }).catch(() => ({ events: [] })),
+      ])
+      const merged = new Map<string, (typeof current.events)[number]>()
+      for (const e of [...earlier.events, ...current.events]) merged.set(e.event_id, e)
+      const events = [...merged.values()]
       const candidates = events
         .filter(e => e.scheduled_at)
         .filter(e => {
