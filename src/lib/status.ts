@@ -59,8 +59,12 @@ function applyUpstreamState(
   status: SportStatus, statusNote: string,
   health: HealthRow | undefined, sub: SubscriptionRow | undefined
 ): { status: SportStatus; statusNote: string } {
+  // STATUS_RANK is lower-is-better (online < limited < offline), the same
+  // convention derive()'s ceiling clamp relies on. "Lower the status" therefore
+  // means moving to a HIGHER rank. This comparison shipped inverted, which made
+  // every degradation a no-op and left soccer "online" with four recorded 403s.
   const lower = (to: SportStatus, note: string) =>
-    STATUS_RANK[to] < STATUS_RANK[status] ? { status: to, statusNote: note } : { status, statusNote }
+    STATUS_RANK[to] > STATUS_RANK[status] ? { status: to, statusNote: note } : { status, statusNote }
 
   // Subscription lapse is knowable in advance; say so before it happens.
   if (sub?.expires_at) {
@@ -240,7 +244,7 @@ export function summarise(list: LiveSportStatus[]) {
      * purpose, not a fault. Counting it made the service verdict read
      * "degraded" in every response ever sent, which is no signal at all.
      */
-    belowDeclared: serving.filter(s => STATUS_RANK[s.status] < STATUS_RANK[declared.get(s.key) ?? 'online']).length,
+    belowDeclared: serving.filter(s => STATUS_RANK[s.status] > STATUS_RANK[declared.get(s.key) ?? 'online']).length,
     online:  serving.filter(s => s.status === 'online').length,
     limited: serving.filter(s => s.status === 'limited').length,
     offline: serving.filter(s => s.status === 'offline').length,
