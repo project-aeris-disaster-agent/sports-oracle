@@ -173,7 +173,13 @@ body::before {
   border: 1px solid var(--edge);
   border-radius: 8px;
   overflow-x: auto;
+  max-width: 100%;
 }
+
+/* A grid item defaults to min-width:auto, so a wide <pre> inside a .panel made
+   the panel wider than a phone viewport and the whole page scrolled sideways.
+   Zero lets the panel shrink and the .code block scroll inside it instead. */
+.panel { min-width: 0; }
 
 .row-toggle { cursor: pointer; width: 100%; text-align: left; }
 

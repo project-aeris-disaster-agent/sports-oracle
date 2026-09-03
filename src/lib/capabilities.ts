@@ -794,7 +794,10 @@ export function badgesFor(sport: SportSpec): Badge[] {
     out.push({
       label: 'SETTLES',
       tone:  'settle',
-      title: `Market settlement via /resolve, sourced from ${def.label}. `
+      // Commercial suppliers are never named on the public page; the sports panel
+      // shows them as a house label, and this tooltip must not undo that. Open
+      // sources keep their names, because crediting them is the deal.
+      title: `Market settlement via /resolve, sourced from ${def.license === 'licensed' ? 'our licensed feed' : def.label}. `
            + 'Returns an explicit official flag — settle only when it is true.',
     })
   }
