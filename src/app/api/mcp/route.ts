@@ -24,6 +24,7 @@ import {
   ENTITLED_SPORTS, getSport, getEndpoint, supportedFor, endpointSource, toolCatalog,
 } from '@/lib/capabilities'
 import { resolverFor, resolveEvent, RESOLVERS } from '@/lib/resolve-dispatch'
+import { readSettlementFeed }        from '@/lib/settlement-feed'
 import { isOpenAndFree }             from '@/lib/providers'
 import { sandboxPayload }            from '@/lib/sandbox'
 
@@ -300,6 +301,25 @@ async function handleTool(
   // the generic pass-through below. See handleResolution.
   if (tool.path === 'events' || tool.path === 'resolve') {
     return handleResolution(tool.path, sport, args, sandbox)
+  }
+
+  // The settlement feed is read from our own observation log, never from an
+  // upstream. Sent to the generic fetch below it would have asked Sportradar for
+  // a dataType called "settlements". Same sandbox rule as resolve: licensed
+  // outcomes are not shown to a free key.
+  if (tool.path === 'settlements') {
+    if (!resolverFor(sport)) {
+      return fail('Settlement feed is not available for this sport.', 404,
+        { code: 'resolution_unsupported', supported: Object.keys(RESOLVERS) })
+    }
+    if (sandbox && !isOpenAndFree(sport, 'results')) {
+      return fail(`Settlement data for ${getSport(sport)?.label ?? sport} comes from a licensed source and is not available on a sandbox key.`,
+        403, { code: 'sandbox_licensed_source', sandboxAvailable: Object.keys(RESOLVERS).filter(s => isOpenAndFree(s, 'results')) })
+    }
+    const feed = await readSettlementFeed(sport, {
+      since: args.since, revised: args.revised === 'true', official: args.official === 'true', limit: args.limit,
+    })
+    return feed.ok ? ok(feed.body, true) : fail(feed.error, feed.error.startsWith('since must') ? 400 : 500)
   }
 
   const date = args.date ?? new Date().toISOString().split('T')[0]

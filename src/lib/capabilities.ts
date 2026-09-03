@@ -289,6 +289,17 @@ const SR_RESOLVE: EndpointSpec = {
         + 'official. Settle when meta.settleable is true, never on `complete`.',
 }
 
+// The settlement transition feed. One call per slate instead of one /resolve per
+// market; `?revised=true` is the revision audit trail. Read from our own
+// observation log, so it costs nothing upstream: ttl 0 means "not cached", and
+// the MCP transport routes it to the feed reader rather than to a provider.
+const SETTLEMENTS: EndpointSpec = {
+  path: 'settlements', dataType: 'settlements', params: ['since?', 'revised?', 'official?', 'limit?'], ttl: 0,
+  desc: 'Settlement transitions since a cursor (official, void, revised, provisional)',
+  signal: 'Poll this once per cycle for the whole slate. Store next_since and pass it back; '
+        + 'revised=true lists any outcome that changed after being reported official.',
+}
+
 type SportDecl = Omit<SportSpec, 'sources'>
 
 const DECLARED: SportDecl[] = [
@@ -297,14 +308,14 @@ const DECLARED: SportDecl[] = [
     note: '/transactions is date-scoped — pass ?date=YYYY-MM-DD for a specific day. '
         + '/free-agents is a large league-wide document (~725KB); use ?limit= or ?fields= '
         + 'unless you genuinely need every unsigned player.',
-    endpoints: [SR_EVENTS, SR_RESOLVE, ...core('nba'), INJURIES, LEADERS, TEAMS, PBP, TRANSACTIONS, FREE_AGENTS, CHANGE_LOG],
+    endpoints: [SR_EVENTS, SR_RESOLVE, SETTLEMENTS, ...core('nba'), INJURIES, LEADERS, TEAMS, PBP, TRANSACTIONS, FREE_AGENTS, CHANGE_LOG],
   },
   {
     key: 'nhl', label: 'NHL', entitled: true, status: 'online', statusNote: 'All endpoints live', capacity: 'high', teamBased: true, season: '2025',
     note: 'NHL/NFL/MLB nest the free-agent list under `league.free_agents`; NBA and WNBA '
         + 'return it at the top level. Verified against the live feed, not normalised — '
         + 'this is a pass-through surface.',
-    endpoints: [SR_EVENTS, SR_RESOLVE, ...core('nhl'), INJURIES, LEADERS, TEAMS, PBP, TRANSACTIONS, FREE_AGENTS, CHANGE_LOG],
+    endpoints: [SR_EVENTS, SR_RESOLVE, SETTLEMENTS, ...core('nhl'), INJURIES, LEADERS, TEAMS, PBP, TRANSACTIONS, FREE_AGENTS, CHANGE_LOG],
   },
   {
     key: 'nfl', label: 'NFL', entitled: true, status: 'online', statusNote: 'All endpoints live', capacity: 'high', teamBased: true, season: '2025',
@@ -312,7 +323,7 @@ const DECLARED: SportDecl[] = [
         + '/free-agents is very large here (~2.4MB, 8k+ players) and nests under '
         + '`league.free_agents` — pass ?limit= unless you need the whole list.',
     endpoints: [
-      SR_EVENTS, SR_RESOLVE,
+      SR_EVENTS, SR_RESOLVE, SETTLEMENTS,
       ...core('nfl', { scores: false }),
       TRANSACTIONS, FREE_AGENTS, CHANGE_LOG,
       { ...INJURIES, params: ['season?', 'week?'] },
@@ -325,16 +336,20 @@ const DECLARED: SportDecl[] = [
   {
     key: 'mlb', label: 'MLB', entitled: true, status: 'online', statusNote: 'All endpoints live · in season', capacity: 'high', teamBased: true, season: '2026',
     note: 'Free agents nest under `league.free_agents` on this feed.',
-    endpoints: [SR_EVENTS, SR_RESOLVE, ...core('mlb'), INJURIES, TEAMS, PBP, TRANSACTIONS, FREE_AGENTS, CHANGE_LOG],
+    endpoints: [SR_EVENTS, SR_RESOLVE, SETTLEMENTS, ...core('mlb'), INJURIES, TEAMS, PBP, TRANSACTIONS, FREE_AGENTS, CHANGE_LOG],
   },
   {
     key: 'wnba', label: 'WNBA', entitled: true, status: 'online', statusNote: 'All endpoints live · in season', capacity: 'medium', teamBased: true, season: '2026',
-    endpoints: [SR_EVENTS, SR_RESOLVE, ...core('wnba'), INJURIES, TEAMS, PBP, TRANSACTIONS, FREE_AGENTS, CHANGE_LOG],
+    endpoints: [SR_EVENTS, SR_RESOLVE, SETTLEMENTS, ...core('wnba'), INJURIES, TEAMS, PBP, TRANSACTIONS, FREE_AGENTS, CHANGE_LOG],
   },
   {
     key: 'tennis', label: 'Tennis', entitled: true, status: 'online', statusNote: 'All endpoints live · in season', capacity: 'high', teamBased: false, season: '2026',
     note: 'Individual sport — /standings returns ATP/WTA rankings. No roster or teams.',
     endpoints: [
+      // Resolution surface. These were added to the five team sports and missed
+      // here, so tennis settled over REST but was absent from the manifest and
+      // the MCP tool enums. Found by a scenario test that listed the MCP tools.
+      SR_EVENTS, SR_RESOLVE, SETTLEMENTS,
       { path: 'schedule',  dataType: 'schedule',  params: ['date?'], ttl: TTL.scores,
         desc: 'Match summaries for a date', signal: 'Draw and match slate.' },
       // 3h, not the 1h default — a tennis day's results settle slowly and
@@ -351,6 +366,7 @@ const DECLARED: SportDecl[] = [
     key: 'mma', label: 'MMA', entitled: true, status: 'limited', statusNote: 'Event-based coverage — fight weeks only', capacity: 'low', teamBased: false, season: '2026',
     note: 'Individual sport. Events are scheduled in weekly cards.',
     endpoints: [
+      SR_EVENTS, SR_RESOLVE, SETTLEMENTS,
       // 6h, matching /scores below. This was TTL.scores (1h), which meant the
       // hourly warm job re-fetched a weekly fight card 24 times a day: 448 of
       // MMA's 2,500 monthly calls went on warming alone in August 2026, with no
@@ -385,6 +401,7 @@ const DECLARED: SportDecl[] = [
     endpoints: [
       EVENTS,
       RESOLVE,
+      SETTLEMENTS,
       { path: 'schedule', dataType: 'schedule', params: ['date?'], ttl: 3600,
         desc: 'Fixture list from a given day', signal: 'The slate markets are opened against.' },
       { path: 'scores',   dataType: 'scores',   params: ['fixture_id'], ttl: 60,
@@ -427,6 +444,7 @@ const DECLARED: SportDecl[] = [
     endpoints: [
       EVENTS,
       RESOLVE,
+      SETTLEMENTS,
       { path: 'schedule',   dataType: 'schedule',   params: ['season?'], ttl: TTL.schedule,
         desc: 'Season race calendar', signal: 'Raw round list and dates.' },
       { path: 'standings',  dataType: 'standings',  params: ['season?'], ttl: TTL.standings,
@@ -496,6 +514,7 @@ const DECLARED: SportDecl[] = [
       // than declaring its own copy, so the two cannot drift apart.
       { ...EVENTS,  ttl: 300 },
       { ...RESOLVE, ttl: 600 },
+      SETTLEMENTS,
       { path: 'live', dataType: 'live', params: [], ttl: 60, minTier: 'analyst',
         desc: 'In-progress professional matches',
         signal: 'In-play pricing only — a live match has no winner and is never settleable.' },
@@ -538,6 +557,7 @@ const DECLARED: SportDecl[] = [
               + 'publishes no forward schedule, so a market must be opened from outside this API '
               + 'and bound to a match id after the fact.' },
       { ...RESOLVE, ttl: 300 },
+      SETTLEMENTS,
       { path: 'standings', dataType: 'standings', params: [], ttl: 900,
         desc: 'Season Elo ladder with computed ranks',
         signal: 'Settles season-ladder and finishing-position markets. Rated players only, which '

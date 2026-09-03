@@ -19,22 +19,12 @@
 // boundary (same observed_at, which the id column disambiguates on our side).
 
 import { NextRequest, NextResponse } from 'next/server'
-import { createClient }              from '@supabase/supabase-js'
 import { gateway }                   from '@/middleware/gateway'
 import { logRequest }                from '@/lib/serve'
 import { isOpenAndFree }             from '@/lib/providers'
 import { RESOLVABLE }                from '@/lib/resolution'
 import { resolverFor }               from '@/lib/resolve-dispatch'
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-)
-
-const DEFAULT_LIMIT = 200
-const MAX_LIMIT     = 1000
-/** Without `since`, how far back the first page reaches. */
-const DEFAULT_WINDOW_MS = 24 * 3600 * 1000
+import { readSettlementFeed }        from '@/lib/settlement-feed'
 
 export async function GET(
   req: NextRequest,
@@ -67,72 +57,23 @@ export async function GET(
     )
   }
 
-  const qs      = new URL(req.url).searchParams
-  const sinceQ  = qs.get('since')
-  const revised = qs.get('revised') === 'true'
-  const officialOnly = qs.get('official') === 'true'
-  const limit   = Math.min(MAX_LIMIT, Math.max(1, Number(qs.get('limit') ?? DEFAULT_LIMIT) || DEFAULT_LIMIT))
+  const qs   = new URL(req.url).searchParams
+  const feed = await readSettlementFeed(sport, {
+    since:    qs.get('since'),
+    revised:  qs.get('revised')  === 'true',
+    official: qs.get('official') === 'true',
+    limit:    qs.get('limit'),
+  })
 
-  let since: string
-  if (sinceQ) {
-    const t = new Date(sinceQ)
-    if (Number.isNaN(t.getTime())) {
-      return NextResponse.json({ error: 'since must be an ISO-8601 timestamp or a previous next_since.' }, { status: 400 })
-    }
-    since = t.toISOString()
-  } else {
-    since = new Date(Date.now() - DEFAULT_WINDOW_MS).toISOString()
+  if (!feed.ok) {
+    const bad = feed.error.startsWith('since must')
+    logRequest(context, sport, 'settlements', false, Date.now() - start, bad ? 400 : 500)
+    return NextResponse.json({ error: feed.error }, { status: bad ? 400 : 500 })
   }
 
-  let q = supabase
-    .from('settlement_observations')
-    .select('id, event_id, status, official, winner_id, void_reason, prev_status, prev_official, revised, source, resolution, observed_at')
-    .eq('sport', sport)
-    .gt('observed_at', since)
-    .order('observed_at', { ascending: true })
-    .order('id',          { ascending: true })
-    .limit(limit)
-  if (revised)      q = q.eq('revised', true)
-  if (officialOnly) q = q.eq('official', true)
-
-  const { data, error } = await q
-  if (error) {
-    logRequest(context, sport, 'settlements', false, Date.now() - start, 500)
-    return NextResponse.json({ error: 'Could not read the settlement feed.' }, { status: 500 })
-  }
-
-  const rows = data ?? []
-  const last = rows[rows.length - 1]
   logRequest(context, sport, 'settlements', true, Date.now() - start)
-
   return NextResponse.json(
-    {
-      sport,
-      since,
-      count:      rows.length,
-      // Pass this back as ?since= to continue. Unchanged when the page is empty,
-      // so a quiet slate polls the same cursor rather than drifting forward and
-      // skipping a transition that lands between polls.
-      next_since: last ? last.observed_at : since,
-      has_more:   rows.length === limit,
-      transitions: rows.map(r => ({
-        observation_id: r.id,
-        event_id:       r.event_id,
-        observed_at:    r.observed_at,
-        from:           r.prev_status ?? null,
-        to:             r.status,
-        official:       r.official,
-        revised:        r.revised,
-        winner_id:      r.winner_id,
-        void_reason:    r.void_reason,
-        // Restated per row so a consumer cannot act on a provisional transition
-        // by accident. A revision is never settleable from this feed: it needs
-        // a human, and the flag is there to summon one.
-        settleable:     r.official && !r.revised,
-        resolution:     r.resolution,
-      })),
-      note: 'Only transitions are listed. An event that has not changed since your cursor is absent, not unresolved.',
-    },
+    feed.body,
     { headers: { 'Cache-Control': 'private, no-store', 'Vary': 'X-Oracle-Key' } }
   )
 }
